@@ -1,0 +1,15 @@
+[Unit]
+Description=Liquidation Alert Service (XAG)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/apps/liquidation-alert
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/apps/liquidation-alert/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8791
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
