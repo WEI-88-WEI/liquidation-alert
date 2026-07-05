@@ -34,22 +34,32 @@ load_dotenv()
 # ==================== 配置 ====================
 FWALERT_URL = os.getenv("LIQUIDATION_FWALERT_URL", os.getenv("FWALERT_URL", ""))
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "10"))
-TARGET_PRICE = float(os.getenv("TARGET_PRICE", "63.2"))
-SYMBOL = "XAG"
 COOLDOWN_SECONDS = int(os.getenv("COOLDOWN_SECONDS", "1800"))
+
+# 新增：监控开关
+ENABLE_MONITORING = os.getenv("ENABLE_MONITORING", "true").lower() == "true"
+
+# 新增多币种配置
+import json
+COINS_CONFIG_RAW = os.getenv("COINS_CONFIG", "[]")
+try:
+    COINS_CONFIG = json.loads(COINS_CONFIG_RAW)
+except Exception:
+    COINS_CONFIG = []
+    logger.error("COINS_CONFIG 解析失败，请检查 JSON 格式")
 
 # ==============================================
 
 app = FastAPI(title="liquidation-alert")
 
+# 多币种状态
 state = {
     "running": False,
-    "last_snapshot": None,
-    "last_error": None,
-    "last_alert": None,
     "started_at": None,
     "loop_count": 0,
-    "last_alert_time": 0,
+    "coins": {},          # 每个币种的最新快照
+    "last_alert_time": {}, # 每个币种的最后告警时间
+    "last_error": None,
 }
 
 
@@ -59,12 +69,13 @@ def append_alert_record(record: dict) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def trigger_phone_alert(price: float, event: str = "price_reached"):
+def trigger_phone_alert(symbol: str, price: float, target_price: float, direction: str):
     record = {
-        "event": event,
-        "symbol": SYMBOL,
+        "event": "price_reached",
+        "symbol": symbol,
         "price": price,
-        "target_price": TARGET_PRICE,
+        "target_price": target_price,
+        "direction": direction,
         "timestamp": time.time(),
         "beijing_time": datetime.now(BEIJING_TZ).isoformat(),
     }
@@ -77,39 +88,65 @@ def trigger_phone_alert(price: float, event: str = "price_reached"):
         return
 
     now = time.time()
-    if now - state["last_alert_time"] < COOLDOWN_SECONDS:
+    last_time = state["last_alert_time"].get(symbol, 0)
+    if now - last_time < COOLDOWN_SECONDS:
         record["suppressed"] = True
         record["reason"] = "cooldown"
         append_alert_record(record)
-        logger.info("Alert suppressed due to cooldown")
+        logger.info(f"[{symbol}] Alert suppressed due to cooldown")
         return
 
     try:
         resp = requests.get(FWALERT_URL, timeout=15)
         resp.raise_for_status()
         record["status_code"] = resp.status_code
-        state["last_alert"] = record
-        state["last_alert_time"] = now
+        state["last_alert_time"][symbol] = now
         append_alert_record(record)
-        logger.warning(f"Phone alert triggered! price={price}")
+        logger.warning(f"[{symbol}] Phone alert triggered! price={price} ({direction})")
     except Exception as e:
         record["error"] = str(e)
         state["last_error"] = str(e)
         append_alert_record(record)
-        logger.exception("Failed to trigger phone alert")
+        logger.exception(f"[{symbol}] Failed to trigger phone alert")
 
 
-def fetch_xyz_price() -> float | None:
+def fetch_xyz_xag_price() -> float | None:
+    """使用 price-alerts 的方式获取 XYZ XAG 价格"""
     try:
         url = "https://api.hyperliquid.xyz/info"
-        payload = {"type": "allMids"}
-        resp = requests.post(url, json=payload, timeout=10)
+        payload = {"type": "metaAndAssetCtxs", "dex": "xyz"}
+        resp = requests.post(url, json=payload, timeout=15)
         resp.raise_for_status()
         data = resp.json()
 
-        for item in data:
-            if item.get("coin") == "xyz:XAG":
-                return float(item["px"])
+        if len(data) < 2:
+            return None
+
+        meta = data[0]
+        asset_ctxs = data[1]
+
+        universe = meta.get("universe", [])
+
+        for idx, asset in enumerate(universe):
+            coin = asset.get("name", "")
+            normalized = coin.split(":", 1)[1] if ":" in coin else coin
+            if normalized.upper() != SYMBOL.upper():
+                continue
+
+            if idx >= len(asset_ctxs):
+                break
+
+            ctx = asset_ctxs[idx]
+            impact_pxs = ctx.get("impactPxs") or []
+            if len(impact_pxs) < 2:
+                break
+
+            # 使用 mid 价格
+            bid = float(impact_pxs[0])
+            ask = float(impact_pxs[1])
+            mid = (bid + ask) / 2
+            return mid
+
         return None
     except Exception as e:
         logger.error(f"Failed to fetch XAG price: {e}")
@@ -120,24 +157,50 @@ def monitor_loop():
     state["running"] = True
     state["started_at"] = time.time()
 
+    # 初始化币种状态
+    for coin in COINS_CONFIG:
+        symbol = coin.get("symbol")
+        if symbol:
+            state["coins"][symbol] = {"price": None, "targets": coin.get("targets", [])}
+            if symbol not in state["last_alert_time"]:
+                state["last_alert_time"][symbol] = 0
+
     while True:
         try:
-            price = fetch_xyz_price()
-            if price is None:
-                time.sleep(POLL_INTERVAL_SECONDS)
-                continue
+            for coin in COINS_CONFIG:
+                symbol = coin.get("symbol")
+                if not symbol:
+                    continue
 
-            snapshot = {
-                "price": price,
-                "target": TARGET_PRICE,
-                "timestamp": time.time(),
-            }
-            state["last_snapshot"] = snapshot
-            state["loop_count"] += 1
+                price = fetch_xyz_xag_price_for_symbol(symbol)
+                if price is None:
+                    continue
 
-            if price >= TARGET_PRICE:
-                logger.warning(f"XAG price reached target! price={price}")
-                trigger_phone_alert(price)
+                # 更新快照
+                state["coins"][symbol]["price"] = price
+                state["loop_count"] += 1
+
+                targets = coin.get("targets", [])
+                for target in targets:
+                    if isinstance(target, dict):
+                        target_price = target.get("price")
+                        direction = target.get("direction", "up")
+                    else:
+                        target_price = target
+                        direction = "up"
+
+                    if target_price is None:
+                        continue
+
+                    triggered = False
+                    if direction == "up" and price >= target_price:
+                        triggered = True
+                    elif direction == "down" and price <= target_price:
+                        triggered = True
+
+                    if triggered:
+                        logger.warning(f"[{symbol}] price reached target! price={price}, target={target_price}, direction={direction}")
+                        trigger_phone_alert(symbol, price, target_price, direction)
 
             time.sleep(POLL_INTERVAL_SECONDS)
 
@@ -149,22 +212,23 @@ def monitor_loop():
 
 @app.on_event("startup")
 def startup_event():
-    import threading
-    threading.Thread(target=monitor_loop, daemon=True).start()
-    logger.info("liquidation-alert started")
+    if ENABLE_MONITORING:
+        import threading
+        threading.Thread(target=monitor_loop, daemon=True).start()
+        logger.info("liquidation-alert started (monitoring enabled)")
+    else:
+        logger.info("liquidation-alert started (monitoring disabled)")
 
 
 @app.get("/")
 def root():
     return {
         "service": "liquidation-alert",
-        "symbol": SYMBOL,
-        "target_price": TARGET_PRICE,
         "poll_interval_seconds": POLL_INTERVAL_SECONDS,
         "fwalert_configured": bool(FWALERT_URL),
         "running": state["running"],
-        "last_snapshot": state["last_snapshot"],
+        "coins": state["coins"],
         "last_error": state["last_error"],
-        "last_alert": state["last_alert"],
         "loop_count": state["loop_count"],
+        "cooldown_seconds": COOLDOWN_SECONDS,
     }
