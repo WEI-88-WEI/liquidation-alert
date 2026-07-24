@@ -10,6 +10,7 @@
   - `up`：价格 ≥ 目标价 时触发
   - `down`：价格 ≤ 目标价 时触发
 - 每个币种**独立冷却**机制
+- 任一币种在 60 秒内价格振幅达到或超过 1% 时触发电话告警
 - 每 10 秒轮询一次价格
 - 提供 HTTP 接口查看实时状态
 
@@ -25,6 +26,8 @@
 | `POLL_INTERVAL_SECONDS` | 轮询间隔（秒）           | 10       | 否   |
 | `COOLDOWN_SECONDS`      | 告警冷却时间（秒）       | 1800     | 否   |
 | `ENABLE_MONITORING`     | 是否开启监控             | true     | 否   |
+| `VOLATILITY_WINDOW_SECONDS` | 波动统计窗口（秒）   | 60       | 否   |
+| `VOLATILITY_THRESHOLD_PERCENT` | 波动告警阈值（百分比） | 1    | 否   |
 | `COINS_CONFIG`          | 多币种配置（JSON）       | -        | 是   |
 
 ### COINS_CONFIG 配置示例
@@ -32,27 +35,32 @@
 ```env
 COINS_CONFIG='[
   {
-    "symbol": "SILVER",
+    "symbol": "CL",
     "targets": [
-      {"price": 63.2, "direction": "up"},
-      {"price": 60.0, "direction": "down"}
+      {"price": 98, "direction": "up"}
     ]
   },
   {
-    "symbol": "GOLD",
+    "symbol": "BRENTOIL",
     "targets": [
-      {"price": 2400, "direction": "up"}
+      {"price": 87.5, "direction": "down"}
     ]
-  },
-  {
-    "symbol": "BTC",
-    "targets": [65000]
   }
 ]'
 ```
 
 - `direction` 可选，默认为 `up`
 - 每个币种的冷却独立计算
+
+### 波动告警规则
+
+每个币种都会记录最近 `VOLATILITY_WINDOW_SECONDS` 秒的价格，并计算：
+
+```text
+振幅 = (窗口最高价 - 窗口最低价) / 窗口最低价 * 100
+```
+
+当振幅大于或等于 `VOLATILITY_THRESHOLD_PERCENT` 时触发电话告警。默认配置下，就是任一币种在 60 秒内价格振幅达到或超过 1% 时告警。
 
 ## 启动
 
@@ -75,8 +83,8 @@ systemctl restart liquidation-alert.service
   "service": "liquidation-alert",
   "running": true,
   "coins": {
-    "SILVER": {
-      "price": 63.25,
+    "CL": {
+      "price": 78.25,
       "targets": [...]
     }
   },
