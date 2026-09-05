@@ -1,13 +1,12 @@
 [Unit]
-Description=Liquidation Alert Service (XAG)
+Description=Hyperliquid XYZ and EntropyIO Alert Service
 After=network.target
 
 [Service]
 Type=simple
-User=root
 WorkingDirectory=/opt/apps/liquidation-alert
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/apps/liquidation-alert/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8791
+ExecStart=/opt/apps/liquidation-alert/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8794
 Restart=always
 RestartSec=5
 

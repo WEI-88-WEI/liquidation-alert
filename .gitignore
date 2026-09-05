@@ -3,5 +3,7 @@ __pycache__/
 *.pyc
 .env
 alerts_log.jsonl
+coins_config.json
+.*coins_config.json.*.tmp
 dist/
 build/

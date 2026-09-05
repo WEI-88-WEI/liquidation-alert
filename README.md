@@ -1,99 +1,146 @@
 # liquidation-alert
 
-多币种价格监控告警服务，支持多个币种、多个价格阈值（支持上涨/下跌两个方向），到达目标价时触发电话告警。
+Hyperliquid HIP-3 多市场价格监控与电话告警服务。目前支持：
+
+- `xyz`：XYZ
+- `io`：EntropyIO
+
+每个市场可以配置多个币种和目标价格，也可以按滚动窗口振幅触发告警。配置可以通过本机 Web 管理页面修改，保存后立即生效，不需要改代码或重启服务。
 
 ## 功能
 
-- 支持配置**多个币种**
-- 每个币种可设置**多个目标价格**
-- 支持两个方向：
-  - `up`：价格 ≥ 目标价 时触发
-  - `down`：价格 ≤ 目标价 时触发
-- 每个币种**独立冷却**机制
-- 任一币种在 60 秒内价格振幅达到或超过 1% 时触发电话告警
-- 每 10 秒轮询一次价格
-- 提供 HTTP 接口查看实时状态
+- 同时监控 XYZ 与 EntropyIO
+- 每个币种支持多个上涨或下跌目标价
+- 每个 `dex:symbol` 独立计算目标价与波动告警冷却
+- 默认在 60 秒窗口振幅达到 1% 时告警
+- 每个 DEX 每轮只请求一次 Hyperliquid API
+- 配置校验、原子持久化与运行时热更新
+- HTTP 状态接口和 Web 管理页面
 
-## 配置
+## 安装与启动
 
-所有配置通过 `.env` 文件完成。
+需要 Python 3.10 或更高版本。
 
-### 环境变量
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
 
-| 变量                    | 说明                     | 默认值   | 必填 |
-|-------------------------|--------------------------|----------|------|
-| `FWALERT_URL`           | 电话告警 webhook         | -        | 是   |
-| `POLL_INTERVAL_SECONDS` | 轮询间隔（秒）           | 10       | 否   |
-| `COOLDOWN_SECONDS`      | 告警冷却时间（秒）       | 1800     | 否   |
-| `ENABLE_MONITORING`     | 是否开启监控             | true     | 否   |
-| `VOLATILITY_WINDOW_SECONDS` | 波动统计窗口（秒）   | 60       | 否   |
-| `VOLATILITY_THRESHOLD_PERCENT` | 波动告警阈值（百分比） | 1    | 否   |
-| `COINS_CONFIG`          | 多币种配置（JSON）       | -        | 是   |
+uvicorn app:app --host 0.0.0.0 --port 8794
+```
 
-### COINS_CONFIG 配置示例
+启动前至少需要在 `.env` 中设置：
+
+```env
+FWALERT_URL=https://your-fwalert-url.com/call
+```
+
+访问 `http://服务器IP:8794/admin`。管理页面不需要用户名或密码，可以：
+
+- 选择 XYZ 或 EntropyIO
+- 从实时资产列表选择币种
+- 启用或暂停监控
+- 单独控制波动告警
+- 添加多个上涨/下跌目标价
+- 保存并立即应用配置
+
+服务监听所有网络接口（`0.0.0.0:8794`），任何能连接服务器 8794 端口的人都可以打开管理页面并修改配置。请确保服务器防火墙或云安全组已放行 TCP 8794。
+
+## 配置来源
+
+首次启动时，服务读取 `.env` 中的 `COINS_CONFIG`。旧格式没有 `dex` 时会自动按 `xyz` 处理：
 
 ```env
 COINS_CONFIG='[
   {
+    "dex": "xyz",
     "symbol": "CL",
+    "volatility_enabled": true,
     "targets": [
       {"price": 98, "direction": "up"}
     ]
   },
   {
-    "symbol": "BRENTOIL",
+    "dex": "io",
+    "symbol": "OAI",
+    "volatility_enabled": true,
     "targets": [
-      {"price": 87.5, "direction": "down"}
+      {"price": 150, "direction": "down"}
     ]
   }
 ]'
 ```
 
-- `direction` 可选，默认为 `up`
-- 每个币种的冷却独立计算
+在管理页面第一次保存后，配置会原子写入 `coins_config.json`，并优先于环境变量。此后增删币种或目标价都不再需要修改 `.env` 或重启。删除该文件后重启，可重新使用 `.env` 中的初始配置。
 
-### 波动告警规则
+### 环境变量
 
-每个币种都会记录最近 `VOLATILITY_WINDOW_SECONDS` 秒的价格，并计算：
+| 变量 | 说明 | 默认值 | 必填 |
+|---|---|---:|:---:|
+| `FWALERT_URL` | 电话告警 webhook | - | 是 |
+| `COINS_CONFIG_PATH` | 持久化配置文件路径 | `coins_config.json` | 否 |
+| `COINS_CONFIG` | 首次启动的币种配置 | `[]` | 否 |
+| `POLL_INTERVAL_SECONDS` | 轮询间隔（秒） | `10` | 否 |
+| `COOLDOWN_SECONDS` | 每个市场的告警冷却（秒） | `1800` | 否 |
+| `ENABLE_MONITORING` | 是否启动监控线程 | `true` | 否 |
+| `VOLATILITY_WINDOW_SECONDS` | 波动统计窗口（秒） | `60` | 否 |
+| `VOLATILITY_THRESHOLD_PERCENT` | 波动告警阈值（百分比） | `1` | 否 |
+
+`direction` 可以是：
+
+- `up`：价格大于或等于目标价时触发
+- `down`：价格小于或等于目标价时触发
+
+波动振幅计算方式：
 
 ```text
 振幅 = (窗口最高价 - 窗口最低价) / 窗口最低价 * 100
 ```
 
-当振幅大于或等于 `VOLATILITY_THRESHOLD_PERCENT` 时触发电话告警。默认配置下，就是任一币种在 60 秒内价格振幅达到或超过 1% 时告警。
+## HTTP 接口
 
-## 启动
+| 接口 | 鉴权 | 用途 |
+|---|---|---|
+| `GET /` | 无 | 查看运行状态、实时价格和最近错误 |
+| `GET /admin` | 无 | 打开管理页面 |
+| `GET /api/config` | 无 | 读取当前配置 |
+| `PUT /api/config` | 无 | 校验、保存并热应用配置 |
+| `GET /api/assets` | 无 | 获取 XYZ 与 EntropyIO 的实时资产列表 |
 
-```bash
-# 开发启动
-uvicorn app:app --host 0.0.0.0 --port 8794
-
-# 使用 systemd（推荐）
-systemctl restart liquidation-alert.service
-```
-
-## 接口
-
-- `GET /`：查看当前所有币种监控状态
-
-返回示例：
+状态中的币种使用完整市场 ID，例如：
 
 ```json
 {
-  "service": "liquidation-alert",
-  "running": true,
   "coins": {
-    "CL": {
-      "price": 78.25,
-      "targets": [...]
+    "xyz:NBIS": {
+      "dex": "xyz",
+      "symbol": "NBIS",
+      "price": 42.18
+    },
+    "io:NBIS": {
+      "dex": "io",
+      "symbol": "NBIS",
+      "price": 42.21
     }
-  },
-  "loop_count": 142
+  }
 }
 ```
 
-## 注意事项
+## systemd
 
-- 服务默认使用 Hyperliquid XYZ 的价格源
-- 建议配合 systemd 守护运行
-- 修改配置后需重启服务生效
+仓库提供 `systemd.liquidation-alert.service`。复制 service 文件到 systemd 目录并确认部署路径后：
+
+```bash
+systemctl daemon-reload
+systemctl enable --now liquidation-alert.service
+systemctl status liquidation-alert.service
+```
+
+服务监听 `0.0.0.0:8794`，并使用进程内监控线程和状态。请保持 Uvicorn 为单 worker，不要添加 `--workers` 参数。
+
+## 测试
+
+```bash
+python -m unittest discover -s tests -v
+```

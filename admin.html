@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Liquidation Alert · 监控配置</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07110e;
+      --panel: #0d1b17;
+      --panel-2: #12241e;
+      --line: #244139;
+      --text: #ecf7f2;
+      --muted: #91aca2;
+      --accent: #4ee1a0;
+      --accent-dark: #173e2f;
+      --danger: #ff7a7a;
+      --warning: #f3c969;
+      --shadow: 0 24px 70px rgba(0, 0, 0, .32);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 12% -10%, rgba(78, 225, 160, .14), transparent 35rem),
+        radial-gradient(circle at 90% 5%, rgba(38, 146, 255, .10), transparent 32rem),
+        var(--bg);
+    }
+
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+
+    .shell { width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 38px 0 80px; }
+    .header { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 28px; }
+    .eyebrow { color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 8px 0 8px; font-size: clamp(28px, 5vw, 46px); line-height: 1.05; letter-spacing: -.035em; }
+    .subtitle { margin: 0; color: var(--muted); max-width: 660px; line-height: 1.65; }
+    .live {
+      display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;
+      padding: 9px 13px; border: 1px solid var(--line); border-radius: 999px;
+      background: rgba(13, 27, 23, .78); color: var(--muted); font-size: 13px;
+    }
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+    .live.running .live-dot { background: var(--accent); box-shadow: 0 0 0 5px rgba(78,225,160,.12); }
+
+    .overview {
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;
+      margin-bottom: 18px;
+    }
+    .metric { padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: rgba(13,27,23,.75); }
+    .metric span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .metric strong { font-size: 16px; }
+
+    .toolbar {
+      position: sticky; top: 12px; z-index: 10; display: flex; align-items: center;
+      justify-content: space-between; gap: 14px; padding: 12px;
+      border: 1px solid var(--line); border-radius: 16px; background: rgba(7,17,14,.88);
+      backdrop-filter: blur(16px); box-shadow: var(--shadow); margin-bottom: 18px;
+    }
+    .toolbar-actions { display: flex; gap: 9px; flex-wrap: wrap; }
+    .dirty { color: var(--warning); font-size: 13px; padding-left: 7px; }
+
+    .btn {
+      border: 1px solid var(--line); color: var(--text); background: var(--panel-2);
+      border-radius: 10px; padding: 9px 14px; font-weight: 700; transition: .16s ease;
+    }
+    .btn:hover { transform: translateY(-1px); border-color: #3a6255; }
+    .btn.primary { color: #052117; background: var(--accent); border-color: var(--accent); }
+    .btn.ghost { background: transparent; }
+    .btn.danger { color: var(--danger); background: transparent; border-color: rgba(255,122,122,.3); }
+    .btn.small { padding: 7px 10px; font-size: 13px; }
+    .btn:disabled { opacity: .45; cursor: wait; transform: none; }
+
+    #notice { display: none; padding: 13px 15px; border-radius: 12px; margin-bottom: 16px; line-height: 1.5; }
+    #notice.show { display: block; }
+    #notice.success { color: var(--accent); border: 1px solid rgba(78,225,160,.32); background: rgba(78,225,160,.08); }
+    #notice.error { color: #ffc0c0; border: 1px solid rgba(255,122,122,.35); background: rgba(255,122,122,.08); }
+    #notice.warning { color: var(--warning); border: 1px solid rgba(243,201,105,.35); background: rgba(243,201,105,.08); }
+
+    .cards { display: grid; gap: 14px; }
+    .coin-card {
+      border: 1px solid var(--line); border-radius: 18px; background: linear-gradient(145deg, var(--panel), #0a1713);
+      box-shadow: 0 18px 48px rgba(0,0,0,.16); overflow: hidden;
+    }
+    .coin-head {
+      display: grid; grid-template-columns: minmax(150px,.75fr) minmax(180px,1fr) auto;
+      align-items: end; gap: 12px; padding: 18px;
+    }
+    .coin-options {
+      display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+      padding: 0 18px 17px; color: var(--muted); font-size: 13px;
+    }
+    .coin-options label { display: inline-flex; align-items: center; gap: 8px; }
+    .price-badge { margin-left: auto; color: var(--accent); font-variant-numeric: tabular-nums; }
+
+    .field-label { display: block; color: var(--muted); font-size: 12px; font-weight: 700; margin: 0 0 7px; }
+    input[type="text"], input[type="number"], select {
+      width: 100%; color: var(--text); background: #08130f; border: 1px solid var(--line);
+      border-radius: 10px; padding: 10px 11px; outline: none;
+    }
+    input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(78,225,160,.10); }
+    input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px; }
+
+    .targets { border-top: 1px solid var(--line); padding: 16px 18px 18px; background: rgba(0,0,0,.08); }
+    .targets-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 11px; }
+    .targets-title strong { font-size: 14px; }
+    .target-row {
+      display: grid; grid-template-columns: minmax(120px, 1fr) 150px auto;
+      gap: 10px; margin-top: 9px; align-items: center;
+    }
+    .target-empty { color: var(--muted); font-size: 13px; padding: 6px 0; }
+    .empty {
+      text-align: center; padding: 52px 20px; border: 1px dashed var(--line);
+      border-radius: 18px; color: var(--muted); background: rgba(13,27,23,.45);
+    }
+    .empty strong { display: block; color: var(--text); font-size: 18px; margin-bottom: 7px; }
+    .footer-note { color: var(--muted); font-size: 12px; line-height: 1.6; margin-top: 20px; }
+
+    @media (max-width: 760px) {
+      .shell { width: min(100% - 20px, 1120px); padding-top: 24px; }
+      .header { display: block; }
+      .live { margin-top: 18px; }
+      .overview { grid-template-columns: 1fr 1fr; }
+      .toolbar { align-items: flex-start; }
+      .coin-head { grid-template-columns: 1fr; align-items: stretch; }
+      .target-row { grid-template-columns: 1fr 105px auto; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="header">
+      <div>
+        <div class="eyebrow">Hyperliquid monitor</div>
+        <h1>价格监控配置</h1>
+        <p class="subtitle">管理 XYZ 与 EntropyIO 的币种、目标价格和波动告警。保存后配置会持久化并立即生效，无需重启服务。</p>
+      </div>
+      <div id="live" class="live"><span class="live-dot"></span><span id="liveText">正在连接…</span></div>
+    </header>
+
+    <section class="overview">
+      <div class="metric"><span>监控项</span><strong id="metricCoins">—</strong></div>
+      <div class="metric"><span>轮询间隔</span><strong id="metricPoll">—</strong></div>
+      <div class="metric"><span>告警冷却</span><strong id="metricCooldown">—</strong></div>
+      <div class="metric"><span>波动规则</span><strong id="metricVolatility">—</strong></div>
+    </section>
+
+    <section class="toolbar">
+      <div class="toolbar-actions">
+        <button class="btn" type="button" onclick="addCoin()">＋ 添加监控项</button>
+        <button class="btn ghost" type="button" onclick="loadAll()">刷新</button>
+        <span id="dirty" class="dirty"></span>
+      </div>
+      <button id="saveButton" class="btn primary" type="button" onclick="saveConfig()">保存并生效</button>
+    </section>
+
+    <div id="notice"></div>
+    <section id="cards" class="cards"><div class="empty">正在加载配置…</div></section>
+    <p class="footer-note">
+      同一个 symbol 可以分别存在于 XYZ 和 EntropyIO，服务会使用 <code>dex:symbol</code> 区分。
+      管理页面无需登录，保存后配置会立即生效。
+    </p>
+  </main>
+
+  <script>
+    let coins = [];
+    let catalog = {};
+    let runtime = { coins: {}, running: false };
+    let dirty = false;
+
+    const escapeHtml = (value) => String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        ...options,
+      });
+      let payload;
+      try { payload = await response.json(); } catch (_) { payload = {}; }
+      if (!response.ok) throw new Error(payload.detail || `请求失败（${response.status}）`);
+      return payload;
+    }
+
+    function setNotice(message = "", type = "success") {
+      const notice = document.getElementById("notice");
+      notice.textContent = message;
+      notice.className = message ? `show ${type}` : "";
+    }
+
+    function setDirty(value = true) {
+      dirty = value;
+      document.getElementById("dirty").textContent = dirty ? "有未保存的修改" : "";
+    }
+
+    function marketPrice(coin) {
+      const item = runtime.coins?.[`${coin.dex}:${coin.symbol.toUpperCase()}`];
+      if (!item || item.price === null || item.price === undefined) return "暂无价格";
+      return `最新价 ${Number(item.price).toLocaleString(undefined, { maximumFractionDigits: 8 })}`;
+    }
+
+    function assetOptions(dex) {
+      const assets = catalog[dex]?.assets || [];
+      return assets.map(asset => `<option value="${escapeHtml(asset.symbol)}"></option>`).join("");
+    }
+
+    function render() {
+      document.getElementById("metricCoins").textContent = String(coins.length);
+      const cards = document.getElementById("cards");
+      if (!coins.length) {
+        cards.innerHTML = `
+          <div class="empty">
+            <strong>还没有监控项</strong>
+            点击“添加监控项”，选择市场和币种后保存即可开始监控。
+          </div>`;
+        return;
+      }
+
+      cards.innerHTML = coins.map((coin, coinIndex) => {
+        const targets = coin.targets || [];
+        const targetRows = targets.length
+          ? targets.map((target, targetIndex) => `
+              <div class="target-row">
+                <input type="number" min="0" step="any" value="${escapeHtml(target.price)}"
+                  aria-label="目标价格"
+                  oninput="updateTarget(${coinIndex}, ${targetIndex}, 'price', this.value)">
+                <select aria-label="触发方向"
+                  onchange="updateTarget(${coinIndex}, ${targetIndex}, 'direction', this.value)">
+                  <option value="up" ${target.direction === "up" ? "selected" : ""}>上涨至 ≥</option>
+                  <option value="down" ${target.direction === "down" ? "selected" : ""}>下跌至 ≤</option>
+                </select>
+                <button class="btn danger small" type="button"
+                  onclick="removeTarget(${coinIndex}, ${targetIndex})">删除</button>
+              </div>`).join("")
+          : '<div class="target-empty">未设置目标价；仍可只启用波动告警。</div>';
+
+        return `
+          <article class="coin-card">
+            <div class="coin-head">
+              <label>
+                <span class="field-label">市场</span>
+                <select onchange="updateCoin(${coinIndex}, 'dex', this.value, true)">
+                  <option value="xyz" ${coin.dex === "xyz" ? "selected" : ""}>XYZ</option>
+                  <option value="io" ${coin.dex === "io" ? "selected" : ""}>EntropyIO</option>
+                </select>
+              </label>
+              <label>
+                <span class="field-label">币种</span>
+                <input type="text" list="assets-${coinIndex}" value="${escapeHtml(coin.symbol)}"
+                  placeholder="例如 CL 或 OAI"
+                  oninput="updateCoin(${coinIndex}, 'symbol', this.value)">
+                <datalist id="assets-${coinIndex}">${assetOptions(coin.dex)}</datalist>
+              </label>
+              <button class="btn danger" type="button" onclick="removeCoin(${coinIndex})">删除监控项</button>
+            </div>
+            <div class="coin-options">
+              <label><input type="checkbox" ${coin.enabled ? "checked" : ""}
+                onchange="updateCoin(${coinIndex}, 'enabled', this.checked)">启用监控</label>
+              <label><input type="checkbox" ${coin.volatility_enabled ? "checked" : ""}
+                onchange="updateCoin(${coinIndex}, 'volatility_enabled', this.checked)">启用波动告警</label>
+              <span class="price-badge">${escapeHtml(marketPrice(coin))}</span>
+            </div>
+            <div class="targets">
+              <div class="targets-title">
+                <strong>目标价格</strong>
+                <button class="btn small" type="button" onclick="addTarget(${coinIndex})">＋ 添加目标价</button>
+              </div>
+              ${targetRows}
+            </div>
+          </article>`;
+      }).join("");
+    }
+
+    function addCoin() {
+      coins.push({
+        dex: "xyz",
+        symbol: "",
+        enabled: true,
+        volatility_enabled: true,
+        targets: [],
+      });
+      setDirty();
+      render();
+    }
+
+    function removeCoin(index) {
+      const label = coins[index]?.symbol || "这个监控项";
+      if (!confirm(`确定删除 ${label}？保存后立即停止监控。`)) return;
+      coins.splice(index, 1);
+      setDirty();
+      render();
+    }
+
+    function updateCoin(index, field, value, shouldRender = false) {
+      coins[index][field] = value;
+      if (field === "symbol") coins[index][field] = value.toUpperCase().trim();
+      if (field === "dex" && coins[index].symbol.includes(":")) coins[index].symbol = "";
+      setDirty();
+      if (shouldRender) render();
+    }
+
+    function addTarget(coinIndex) {
+      coins[coinIndex].targets.push({ price: "", direction: "up" });
+      setDirty();
+      render();
+    }
+
+    function removeTarget(coinIndex, targetIndex) {
+      coins[coinIndex].targets.splice(targetIndex, 1);
+      setDirty();
+      render();
+    }
+
+    function updateTarget(coinIndex, targetIndex, field, value) {
+      coins[coinIndex].targets[targetIndex][field] = field === "price" ? value : value;
+      setDirty();
+    }
+
+    async function loadAll() {
+      if (dirty && !confirm("刷新会放弃尚未保存的修改，是否继续？")) return;
+      setNotice("");
+      try {
+        const [configData, assetData, statusData] = await Promise.all([
+          api("/api/config"),
+          api("/api/assets"),
+          api("/"),
+        ]);
+        coins = configData.coins;
+        catalog = assetData.markets;
+        runtime = statusData;
+
+        const settings = configData.settings;
+        document.getElementById("metricPoll").textContent = `${settings.poll_interval_seconds} 秒`;
+        document.getElementById("metricCooldown").textContent = `${settings.cooldown_seconds} 秒`;
+        document.getElementById("metricVolatility").textContent =
+          `${settings.volatility_window_seconds} 秒 / ${settings.volatility_threshold_percent}%`;
+
+        const live = document.getElementById("live");
+        live.classList.toggle("running", Boolean(statusData.running));
+        document.getElementById("liveText").textContent = statusData.running ? "监控运行中" : "监控未运行";
+
+        if (Object.keys(assetData.errors || {}).length) {
+          const failed = Object.keys(assetData.errors).join("、");
+          setNotice(`部分市场列表获取失败：${failed}。已有配置仍可编辑。`, "warning");
+        } else if (configData.config.error) {
+          setNotice(`原配置加载失败：${configData.config.error}。请修正后保存。`, "warning");
+        }
+        setDirty(false);
+        render();
+      } catch (error) {
+        setNotice(error.message, "error");
+        document.getElementById("cards").innerHTML =
+          '<div class="empty"><strong>加载失败</strong>请检查服务日志和管理密码配置。</div>';
+      }
+    }
+
+    async function saveConfig() {
+      const saveButton = document.getElementById("saveButton");
+      saveButton.disabled = true;
+      setNotice("");
+      try {
+        const payload = {
+          coins: coins.map(coin => ({
+            ...coin,
+            symbol: String(coin.symbol || "").trim().toUpperCase(),
+            targets: (coin.targets || []).map(target => ({
+              price: Number(target.price),
+              direction: target.direction,
+            })),
+          })),
+        };
+        const result = await api("/api/config", {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        });
+        coins = result.coins;
+        setDirty(false);
+        setNotice(result.message, "success");
+        await refreshRuntime();
+        render();
+      } catch (error) {
+        setNotice(error.message, "error");
+      } finally {
+        saveButton.disabled = false;
+      }
+    }
+
+    async function refreshRuntime() {
+      try {
+        runtime = await api("/");
+        const live = document.getElementById("live");
+        live.classList.toggle("running", Boolean(runtime.running));
+        document.getElementById("liveText").textContent = runtime.running ? "监控运行中" : "监控未运行";
+      } catch (_) {}
+    }
+
+    window.addEventListener("beforeunload", event => {
+      if (!dirty) return;
+      event.preventDefault();
+      event.returnValue = "";
+    });
+
+    loadAll();
+  </script>
+</body>
+</html>
