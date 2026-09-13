@@ -184,6 +184,30 @@ class MonitoringTests(unittest.TestCase):
 
         self.assertFalse(app.state["volatility_alert_armed"][self.key])
 
+    def test_read_recent_alerts_returns_newest_first_and_skips_bad_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = Path(tmp_dir) / "alerts_log.jsonl"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"event": "volatility_reached", "market": "io:OAI", "timestamp": 100.0}),
+                        "not-json",
+                        json.dumps({"event": "price_reached", "market": "xyz:CL", "timestamp": 200.0}),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(app, "ALERTS_LOG_PATH", log_path):
+                records = app.read_recent_alerts(10)
+                self.assertEqual([record["timestamp"] for record in records], [200.0, 100.0])
+                self.assertEqual(len(app.read_recent_alerts(1)), 1)
+                self.assertEqual(app.read_recent_alerts(1)[0]["event"], "price_reached")
+
+            with patch.object(app, "ALERTS_LOG_PATH", Path(tmp_dir) / "missing.jsonl"):
+                self.assertEqual(app.read_recent_alerts(5), [])
+
 
 if __name__ == "__main__":
     unittest.main()

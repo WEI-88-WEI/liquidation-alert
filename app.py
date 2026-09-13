@@ -295,6 +295,40 @@ def append_alert_record(record: dict[str, Any]) -> None:
         logger.exception("Failed to append alert log")
 
 
+def read_recent_alerts(limit: int = 100) -> list[dict[str, Any]]:
+    """读取最近的电话告警记录，最新的一条在最前面。
+
+    只读取文件末尾的 limit 行（deque 定长），损坏行直接跳过，读失败返回空列表而不是抛错。
+    """
+    if not ALERTS_LOG_PATH.exists():
+        return []
+
+    safe_limit = max(1, limit)
+    lines: deque[str] = deque(maxlen=safe_limit)
+    try:
+        with alert_log_lock:
+            with open(ALERTS_LOG_PATH, "r", encoding="utf-8", errors="ignore") as alert_file:
+                for line in alert_file:
+                    lines.append(line.rstrip("\n"))
+    except OSError as exc:
+        set_last_error(f"读取告警日志失败: {exc}")
+        logger.exception("Failed to read alert log")
+        return []
+
+    records: list[dict[str, Any]] = []
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            records.append(payload)
+    return records
+
+
 def trigger_phone_alert(
     dex: str,
     symbol: str,
@@ -771,3 +805,16 @@ def get_available_assets() -> dict[str, Any]:
             markets[dex] = {"name": display_name, "assets": []}
 
     return {"markets": markets, "errors": errors}
+
+
+@app.get("/alert-data")
+def get_alert_data(limit: int = 100) -> dict[str, Any]:
+    """读取最近的电话告警记录（最新在前），数据来自 alerts_log.jsonl。"""
+    safe_limit = max(1, min(limit, 10000))
+    items = read_recent_alerts(safe_limit)
+    return {
+        "count": len(items),
+        "items": items,
+        "alerts_log_path": str(ALERTS_LOG_PATH),
+        "fwalert_configured": bool(FWALERT_URL),
+    }

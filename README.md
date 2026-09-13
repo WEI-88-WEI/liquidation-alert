@@ -107,6 +107,33 @@ COINS_CONFIG='[
 | `GET /api/config` | 无 | 读取当前配置 |
 | `PUT /api/config` | 无 | 校验、保存并热应用配置 |
 | `GET /api/assets` | 无 | 获取 XYZ 与 EntropyIO 的实时资产列表 |
+| `GET /alert-data` | 无 | 读取最近的电话告警记录（最新在前，`limit` 默认 100，最大 10000） |
+
+`GET /alert-data` 读取 `alerts_log.jsonl`（服务同目录），只返回文件末尾的 `limit` 条，所以文件再大也不会一次读进内存；文件不存在或读取失败时返回空列表，不会报错。
+
+```bash
+curl -s 'http://服务器IP:8794/alert-data?limit=20'
+```
+
+```json
+{
+  "count": 20,
+  "alerts_log_path": "/root/repos/liquidation-alert/alerts_log.jsonl",
+  "fwalert_configured": true,
+  "items": [
+    {
+      "event": "volatility_reached",
+      "market": "io:OAI",
+      "price": 1510.171,
+      "percent_move": 1.4326854376093963,
+      "beijing_time": "2026-09-13T15:39:17.305630+08:00",
+      "status_code": 200
+    }
+  ]
+}
+```
+
+每条记录代表一次电话告警尝试：`status_code` 存在表示 webhook 调用成功（已拨出），`error` 字段存在表示失败（例如 `missing_fwalert_url`）。注意 `trigger_phone_alert` 在冷却期内被抑制时不写记录。
 
 状态中的币种使用完整市场 ID，例如：
 
