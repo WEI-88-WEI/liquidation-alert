@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import html
 import json
 import logging
 import math
@@ -818,3 +819,264 @@ def get_alert_data(limit: int = 100) -> dict[str, Any]:
         "alerts_log_path": str(ALERTS_LOG_PATH),
         "fwalert_configured": bool(FWALERT_URL),
     }
+
+
+def format_alert_number(value: Any) -> str:
+    """把告警记录里的数字裁成紧凑文本（去掉浮点尾巴），非数字原样转义返回。"""
+    if value is None or isinstance(value, bool):
+        return "-"
+    if isinstance(value, (int, float)):
+        text = f"{value:.6f}".rstrip("0").rstrip(".")
+        return text or "0"
+    return html.escape(str(value))
+
+
+def format_alert_time(value: Any) -> str:
+    """把 ISO 北京时间裁成 `YYYY-MM-DD HH:MM:SS`，其它格式原样返回。"""
+    text = str(value or "-")
+    if "T" not in text:
+        return html.escape(text)
+    text = text.split("+", 1)[0].split(".", 1)[0].replace("T", " ")
+    return html.escape(text)
+
+
+def describe_alert_condition(record: dict[str, Any]) -> str:
+    """把一条记录翻译成可读的触发条件（价格到达 / 波动振幅）。"""
+    target_price = record.get("target_price")
+    if target_price is not None:
+        direction_text = {"up": "向上到达", "down": "向下到达"}.get(str(record.get("direction")), "")
+        suffix = f"（{direction_text}）" if direction_text else ""
+        return f"目标价 {format_alert_number(target_price)}{suffix}"
+
+    percent_move = record.get("percent_move")
+    if percent_move is not None:
+        return (
+            f"{format_alert_number(record.get('window_seconds'))}s 振幅 "
+            f"{format_alert_number(percent_move)}%"
+            f"（阈值 {format_alert_number(record.get('threshold_percent'))}%，"
+            f"区间 {format_alert_number(record.get('window_min'))} ~ "
+            f"{format_alert_number(record.get('window_max'))}）"
+        )
+    return "-"
+
+
+def alert_market_label(record: dict[str, Any]) -> str:
+    """市场标签：优先 `market`，兼容旧记录只有 `symbol`（64ba662 之前没有 market/dex 字段）。"""
+    market = record.get("market")
+    if market:
+        return html.escape(str(market))
+    symbol = record.get("symbol")
+    dex = record.get("dex")
+    if symbol and dex:
+        return html.escape(f"{dex}:{symbol}")
+    if symbol:
+        return html.escape(str(symbol))
+    return "-"
+
+
+def describe_alert_result(record: dict[str, Any]) -> tuple[str, str]:
+    """返回 (结果文案, 样式 class)：已拨出 / 失败 / 冷却抑制 / 未发送。"""
+    error = record.get("error")
+    if error:
+        return f"失败（{html.escape(str(error))}）", "bad"
+    status_code = record.get("status_code")
+    if status_code:
+        return f"已拨出（{html.escape(str(status_code))}）", "ok"
+    if record.get("suppressed"):
+        reason = html.escape(str(record.get("reason") or "suppressed"))
+        return f"冷却期抑制（{reason}）", "muted"
+    return "未发送", "muted"
+
+
+def alert_event_label(record: dict[str, Any]) -> str:
+    event = str(record.get("event") or "")
+    if event == "volatility_reached":
+        return "波动告警"
+    if event == "price_reached":
+        return "价格到达"
+    return html.escape(event or "-")
+
+
+def render_alert_html(limit: int = 100) -> str:
+    """渲染电话告警记录页面（服务端渲染，所有字段都经过转义）。"""
+    safe_limit = max(1, min(limit, 500))
+    items = read_recent_alerts(safe_limit)
+
+    now = time.time()
+    recent_24h = 0
+    for record in items:
+        timestamp = record.get("timestamp")
+        if isinstance(timestamp, (int, float)) and timestamp > 0:
+            if timestamp > 1e11:  # 毫秒时间戳兼容
+                timestamp = timestamp / 1000
+            if now - timestamp <= 86400:
+                recent_24h += 1
+
+    rows: list[str] = []
+    for record in items:
+        result_text, result_class = describe_alert_result(record)
+        rows.append(
+            "<tr>"
+            f"<td>{format_alert_time(record.get('beijing_time'))}</td>"
+            f"<td>{alert_event_label(record)}</td>"
+            f"<td><b>{alert_market_label(record)}</b></td>"
+            f"<td class=\"num\">{format_alert_number(record.get('price'))}</td>"
+            f"<td>{describe_alert_condition(record)}</td>"
+            f"<td class=\"{result_class}\">{result_text}</td>"
+            "</tr>"
+        )
+
+    table_body = "\n".join(rows) or '<tr><td colspan="6" class="empty">暂无电话告警记录</td></tr>'
+    generated_at = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    limit_links = " · ".join(
+        f'<a href="/alert?limit={size}">{size}</a>' if size != safe_limit else f"<b>{size}</b>"
+        for size in (50, 100, 200, 500)
+    )
+
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>liquidation-alert 电话告警记录</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #0f141a;
+      --panel: #161d24;
+      --line: #27313c;
+      --text: #e7edf3;
+      --muted: #91a0af;
+      --accent: #7cc7ff;
+      --ok: #5fd39a;
+      --bad: #ff8b8b;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    main {{
+      width: min(1180px, calc(100vw - 32px));
+      margin: 28px auto;
+    }}
+    header {{
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-end;
+      margin-bottom: 18px;
+    }}
+    h1 {{ margin: 0 0 6px; font-size: 24px; letter-spacing: 0; }}
+    .muted {{ color: var(--muted); font-size: 13px; line-height: 1.7; }}
+    .pills {{ display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }}
+    .pill {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      color: var(--muted);
+      white-space: nowrap;
+      font-size: 13px;
+      background: var(--panel);
+    }}
+    .table-wrap {{
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }}
+    table {{ width: 100%; border-collapse: collapse; min-width: 900px; }}
+    th, td {{
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      font-size: 13px;
+      white-space: nowrap;
+    }}
+    th {{
+      color: var(--muted);
+      font-weight: 600;
+      background: #111821;
+    }}
+    tr:last-child td {{ border-bottom: 0; }}
+    .num {{ font-variant-numeric: tabular-nums; }}
+    .ok {{ color: var(--ok); font-variant-numeric: tabular-nums; }}
+    .bad {{ color: var(--bad); font-variant-numeric: tabular-nums; }}
+    .empty {{ text-align: center; color: var(--muted); padding: 28px 12px; }}
+    a {{ color: var(--accent); text-decoration: none; }}
+    label {{ cursor: pointer; user-select: none; }}
+    @media (max-width: 720px) {{
+      main {{ width: calc(100vw - 20px); margin: 18px auto; }}
+      header {{ display: block; }}
+      .pills {{ justify-content: flex-start; margin-top: 10px; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>电话告警记录</h1>
+        <div class="muted">
+          共 {len(items)} 条 · 近 24 小时 {recent_24h} 条 · 页面生成于 {generated_at}（北京时间）<br>
+          数据文件：{html.escape(str(ALERTS_LOG_PATH))}
+        </div>
+      </div>
+      <div class="pills">
+        <div class="pill">显示条数 {limit_links}</div>
+        <div class="pill"><a href="/alert-data?limit={safe_limit}">JSON</a></div>
+        <div class="pill"><label><input type="checkbox" id="auto"> 自动刷新 15s</label></div>
+      </div>
+    </header>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>时间（北京）</th>
+            <th>事件</th>
+            <th>市场</th>
+            <th>价格</th>
+            <th>触发条件</th>
+            <th>结果</th>
+          </tr>
+        </thead>
+        <tbody>
+          {table_body}
+        </tbody>
+      </table>
+    </div>
+  </main>
+  <script>
+    (function () {{
+      var box = document.getElementById("auto");
+      function store(value) {{
+        try {{ localStorage.setItem("liquidationAlertAutoRefresh", value); }} catch (err) {{}}
+      }}
+      try {{ box.checked = localStorage.getItem("liquidationAlertAutoRefresh") === "1"; }} catch (err) {{}}
+      box.addEventListener("change", function () {{ store(box.checked ? "1" : "0"); }});
+      setInterval(function () {{ if (box.checked) {{ location.reload(); }} }}, 15000);
+    }})();
+  </script>
+</body>
+</html>"""
+
+
+@app.get("/alert", response_class=HTMLResponse)
+def alert_page(limit: int = 100) -> HTMLResponse:
+    """电话告警记录页面，默认展示最近 100 条。"""
+    safe_limit = max(1, min(limit, 500))
+    return HTMLResponse(
+        render_alert_html(safe_limit),
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": (
+                "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "script-src 'self' 'unsafe-inline'; connect-src 'self'; "
+                "img-src 'self' data:; frame-ancestors 'none'"
+            ),
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+        },
+    )

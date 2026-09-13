@@ -208,6 +208,83 @@ class MonitoringTests(unittest.TestCase):
             with patch.object(app, "ALERTS_LOG_PATH", Path(tmp_dir) / "missing.jsonl"):
                 self.assertEqual(app.read_recent_alerts(5), [])
 
+    def test_alert_page_escapes_record_fields_and_renders_both_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_path = Path(tmp_dir) / "alerts_log.jsonl"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "event": "price_reached",
+                                "market": "xyz:CL",
+                                "price": 98.5,
+                                "target_price": 98,
+                                "direction": "up",
+                                "timestamp": 1_789_200_000.0,
+                                "beijing_time": "2026-09-12T18:00:00.000000+08:00",
+                                "error": "ConnectionError",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "event": "volatility_reached",
+                                "market": "<img src=x onerror=alert(1)>",
+                                "price": 1510.1709999999998,
+                                "window_seconds": 60,
+                                "threshold_percent": 1.0,
+                                "window_min": 1510.171,
+                                "window_max": 1531.807,
+                                "percent_move": 1.4326854376093963,
+                                "timestamp": time.time(),
+                                "beijing_time": "2026-09-13T15:39:17.305630+08:00",
+                                "status_code": 200,
+                            }
+                        ),
+                        # 旧记录：没有 market/dex 字段，且是冷却期被抑制
+                        json.dumps(
+                            {
+                                "event": "price_reached",
+                                "symbol": "BRENTOIL",
+                                "price": 83.2999,
+                                "target_price": 84,
+                                "direction": "down",
+                                "timestamp": 1_785_229_005.0,
+                                "beijing_time": "2026-07-28T16:56:45.155060+08:00",
+                                "suppressed": True,
+                                "reason": "cooldown",
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.object(app, "ALERTS_LOG_PATH", log_path):
+                page = app.render_alert_html(100)
+
+            # 记录里的字符串必须转义，页面不允许出现可执行的原始标签
+            self.assertNotIn("<img src=x", page)
+            self.assertIn("&lt;img src=x onerror=alert(1)&gt;", page)
+            # 两种事件都渲染，数字裁掉浮点尾巴，结果区分成功/失败
+            self.assertIn("价格到达", page)
+            self.assertIn("目标价 98（向上到达）", page)
+            self.assertIn("失败（ConnectionError）", page)
+            self.assertIn("波动告警", page)
+            self.assertIn("1510.171", page)
+            self.assertIn("已拨出（200）", page)
+            self.assertIn("近 24 小时 1 条", page)
+            # 旧记录没有 market 字段 → 回退显示 symbol；冷却期抑制单独标出
+            self.assertIn("<b>BRENTOIL</b>", page)
+            self.assertIn("冷却期抑制（cooldown）", page)
+            self.assertNotIn("<b>-</b>", page)
+
+            with patch.object(app, "ALERTS_LOG_PATH", Path(tmp_dir) / "missing.jsonl"):
+                empty_page = app.render_alert_html(50)
+            self.assertIn("暂无电话告警记录", empty_page)
+            self.assertIn("共 0 条", empty_page)
+
 
 if __name__ == "__main__":
     unittest.main()
