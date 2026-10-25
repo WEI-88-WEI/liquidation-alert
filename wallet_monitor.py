@@ -345,7 +345,8 @@ class WalletMonitor:
             return copy.deepcopy(events[:max(1, min(limit, MAX_EVENTS))])
 
     def _request(self, payload: dict[str, Any]) -> Any:
-        response = requests.post(self.info_url, json=payload, timeout=(5, 15))
+        # 到 HL 的国际链路偶发抖动（实测 TLS 握手可到 3.6s），连接/读取时限各留余量。
+        response = requests.post(self.info_url, json=payload, timeout=(8, 20))
         response.raise_for_status()
         return response.json()
 
