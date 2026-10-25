@@ -4,6 +4,10 @@ __pycache__/
 .env
 alerts_log.jsonl
 coins_config.json
+wallets_config.json
+wallet_monitor_state.json
+.*wallets_config.json.*.tmp
+.*wallet_monitor_state.json.*.tmp
 .*coins_config.json.*.tmp
 dist/
 build/

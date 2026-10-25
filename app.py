@@ -26,6 +26,7 @@ from config_store import (
     validate_coins_config,
     write_coins_config,
 )
+from wallet_monitor import ConfigConflictError, WalletMonitor
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -114,6 +115,20 @@ COINS_CONFIG_PATH = raw_config_path if raw_config_path.is_absolute() else BASE_D
 ALERTS_LOG_PATH = BASE_DIR / "alerts_log.jsonl"
 COINS_CONFIG_RAW = os.getenv("COINS_CONFIG", "[]")
 # ==============================================
+
+
+def resolve_data_path(variable: str, default: str) -> Path:
+    path = Path(os.getenv(variable, default))
+    return path if path.is_absolute() else BASE_DIR / path
+
+
+wallet_monitor = WalletMonitor(
+    base_dir=BASE_DIR,
+    info_url=HYPERLIQUID_INFO_URL,
+    config_path=resolve_data_path("WALLETS_CONFIG_PATH", "wallets_config.json"),
+    state_path=resolve_data_path("WALLET_STATE_PATH", "wallet_monitor_state.json"),
+    env_config=os.getenv("WALLETS_CONFIG", "{}"),
+)
 
 if POLL_INTERVAL_SECONDS <= 0:
     raise RuntimeError("POLL_INTERVAL_SECONDS 必须大于 0")
@@ -687,6 +702,7 @@ def startup_event() -> None:
         logger.info("liquidation-alert started (monitoring disabled)")
         return
 
+    wallet_monitor.start()
     if monitor_thread is None or not monitor_thread.is_alive():
         monitor_stop_event.clear()
         monitor_wakeup_event.clear()
@@ -703,6 +719,7 @@ def startup_event() -> None:
 def shutdown_event() -> None:
     monitor_stop_event.set()
     monitor_wakeup_event.set()
+    wallet_monitor.stop()
     if monitor_thread and monitor_thread.is_alive():
         monitor_thread.join(timeout=5)
 
@@ -741,6 +758,73 @@ def admin_page() -> HTMLResponse:
             "X-Frame-Options": "DENY",
         },
     )
+
+
+@app.get("/wallets", response_class=HTMLResponse)
+def wallets_page() -> HTMLResponse:
+    page_path = BASE_DIR / "wallets.html"
+    if not page_path.exists():
+        raise HTTPException(status_code=500, detail="地址监控页面文件不存在")
+    return HTMLResponse(
+        page_path.read_text(encoding="utf-8"),
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": (
+                "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "script-src 'self' 'unsafe-inline'; connect-src 'self'; "
+                "img-src 'self' data:; frame-ancestors 'none'"
+            ),
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+        },
+    )
+
+
+@app.get("/api/wallets")
+def get_wallet_status() -> dict[str, Any]:
+    return wallet_monitor.snapshot()
+
+
+@app.get("/api/wallets/config")
+def get_wallet_config() -> dict[str, Any]:
+    return wallet_monitor.get_config()
+
+
+@app.put("/api/wallets/config")
+async def update_wallet_config(request: Request) -> dict[str, Any]:
+    try:
+        request_body = await request.body()
+        if len(request_body) > 64 * 1024:
+            raise HTTPException(status_code=413, detail="地址配置内容过大")
+        payload = json.loads(request_body)
+        updated = await run_in_threadpool(wallet_monitor.replace_config, payload)
+    except ConfigConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError, ConfigValidationError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"保存地址配置失败: {exc}") from exc
+    return {**updated, "ok": True, "message": "地址配置已保存并实时生效，无需重启服务"}
+
+
+@app.get("/api/wallets/events")
+def get_wallet_events(address: str | None = None, limit: int = 100) -> dict[str, Any]:
+    try:
+        items = wallet_monitor.get_events(address=address, limit=max(1, min(limit, 500)))
+    except ConfigValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/api/wallets/{address}/positions")
+def get_wallet_positions(address: str, refresh: bool = False) -> dict[str, Any]:
+    try:
+        return wallet_monitor.get_positions(address, refresh=refresh)
+    except ConfigValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (requests.RequestException, RuntimeError, ValueError) as exc:
+        logger.warning("Wallet positions refresh failed: %s", exc)
+        raise HTTPException(status_code=503, detail="持仓查询失败，请稍后重试；最近一次成功结果仍保留在页面中") from exc
 
 
 @app.get("/api/config")

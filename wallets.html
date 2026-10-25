@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Liquidation Alert · 地址监控</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07110e; --panel: #0d1b17; --panel-2: #12241e; --line: #244139;
+      --text: #ecf7f2; --muted: #91aca2; --accent: #4ee1a0; --danger: #ff8b8b; --warning: #f3c969;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at 12% -10%, rgba(78,225,160,.13), transparent 35rem), var(--bg);
+    }
+    main { width: min(1240px, calc(100% - 32px)); margin: 0 auto; padding: 34px 0 70px; }
+    header, .section-head, .toolbar, .actions, .card-head, .card-foot { display: flex; align-items: center; gap: 12px; }
+    header, .section-head, .toolbar, .card-head { justify-content: space-between; }
+    header { align-items: flex-start; margin-bottom: 24px; }
+    .eyebrow { color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: .15em; }
+    h1 { margin: 8px 0 10px; font-size: clamp(28px, 5vw, 42px); letter-spacing: -.03em; }
+    h2 { margin: 0; font-size: 19px; }
+    p { margin: 0; }
+    .muted, .description { color: var(--muted); font-size: 13px; line-height: 1.7; }
+    .description { max-width: 780px; }
+    nav { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 13px; font-size: 13px; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { opacity: .45; cursor: default; }
+    .btn { border: 1px solid var(--line); border-radius: 10px; padding: 9px 13px; background: var(--panel-2); color: var(--text); font-size: 13px; font-weight: 700; }
+    .btn:hover:not(:disabled) { border-color: var(--accent); }
+    .primary { background: var(--accent); border-color: var(--accent); color: #052117; }
+    .danger { color: var(--danger); background: transparent; }
+    input[type="text"], input[type="number"], select {
+      width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 9px;
+      padding: 10px; background: #08130f; color: var(--text);
+    }
+    input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px; }
+    label { color: var(--muted); font-size: 12px; }
+    .field { display: grid; gap: 7px; }
+    .address { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+    .live { white-space: nowrap; border: 1px solid var(--line); border-radius: 30px; padding: 10px 14px; font-size: 13px; color: var(--muted); }
+    .live.running { color: var(--accent); }
+    .live.stale { color: var(--warning); }
+    [hidden] { display: none !important; }
+    .tabs { display: flex; gap: 6px; padding: 5px; margin-bottom: 20px; width: fit-content; max-width: 100%; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+    .tab { border: 0; border-radius: 8px; padding: 10px 18px; background: transparent; color: var(--muted); font-size: 14px; font-weight: 700; }
+    .tab:hover { color: var(--text); }
+    .tab[aria-selected="true"] { background: var(--panel-2); color: var(--accent); }
+    .tab-dirty { color: var(--warning); font-size: 11px; margin-left: 5px; }
+    .overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 22px; }
+    .metric { padding: 15px 17px; background: rgba(13,27,23,.8); border: 1px solid var(--line); border-radius: 13px; }
+    .metric span { display: block; margin-bottom: 7px; color: var(--muted); font-size: 12px; }
+    .metric strong { font-size: 17px; }
+    .metric .hint { margin: 7px 0 0; font-size: 11px; }
+    .panel { margin-top: 18px; border: 1px solid var(--line); border-radius: 16px; background: rgba(13,27,23,.8); padding: 20px; }
+    .section-head { margin-bottom: 15px; flex-wrap: wrap; }
+    .section-head .description { margin-top: 5px; }
+    .toolbar { flex-wrap: wrap; margin-top: 16px; padding-top: 15px; border-top: 1px solid var(--line); }
+    .actions { flex-wrap: wrap; }
+    .interval { display: flex; align-items: center; gap: 9px; }
+    .interval input { width: 88px; }
+    #dirty { color: var(--warning); font-size: 12px; }
+    .wallet-editor { display: grid; grid-template-columns: minmax(230px, 2fr) minmax(130px, 1fr) auto auto; align-items: end; gap: 12px; padding: 13px 0; }
+    .wallet-editor + .wallet-editor { border-top: 1px solid var(--line); }
+    .toggle { display: flex; align-items: center; gap: 7px; min-height: 38px; white-space: nowrap; }
+    .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 25px 14px; line-height: 1.8; }
+    .notice { display: none; padding: 12px 15px; border: 1px solid var(--line); border-radius: 10px; font-size: 13px; line-height: 1.7; margin: 12px 0; overflow-wrap: anywhere; }
+    .notice.show { display: block; }
+    .notice.error { color: #ffc0c0; background: rgba(255,122,122,.07); border-color: rgba(255,122,122,.3); }
+    .notice.warning { color: var(--warning); background: rgba(243,201,105,.06); border-color: rgba(243,201,105,.3); }
+    .notice.success { color: var(--accent); }
+    .filters { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
+    .filters .field { width: min(360px, 100%); }
+    .wallet-positions { display: grid; gap: 12px; min-width: 0; }
+    .wallet-position { min-width: 0; border: 1px solid var(--line); border-radius: 12px; background: #0a1713; }
+    .wallet-position.error { border-color: rgba(243,201,105,.4); }
+    .wallet-summary { display: flex; gap: 12px; align-items: flex-start; cursor: pointer; list-style: none; padding: 17px; border-radius: 12px; }
+    .wallet-summary::-webkit-details-marker { display: none; }
+    .wallet-summary::before { content: "▸"; color: var(--accent); flex-shrink: 0; margin-top: 2px; }
+    .wallet-position[open] > .wallet-summary::before { transform: rotate(90deg); }
+    .wallet-summary:hover { background: rgba(78,225,160,.04); }
+    .wallet-identity { min-width: 0; flex: 1; }
+    .wallet-name { display: block; margin-bottom: 5px; font-size: 14px; overflow-wrap: anywhere; }
+    .wallet-address { display: block; color: var(--muted); font-size: 12px; line-height: 1.7; }
+    .wallet-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 9px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .wallet-hint { margin-top: 7px; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+    .wallet-content { padding: 0 17px 17px; }
+    .wallet-content-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 14px 0; border-top: 1px solid var(--line); }
+    .wallet-content table { min-width: 820px; }
+    .wallet-content .notice { margin-bottom: 0; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 950px; }
+    th, td { padding: 12px 11px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    th { font-size: 12px; font-weight: 600; color: var(--muted); }
+    tbody tr:last-child td { border-bottom: 0; }
+    .num { font-variant-numeric: tabular-nums; }
+    .positive { color: var(--accent); }
+    .negative { color: var(--danger); }
+    .events { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .event-card { min-width: 0; border: 1px solid var(--line); border-radius: 12px; padding: 17px; background: linear-gradient(145deg, #12241e, #0a1713); }
+    .card-head { align-items: flex-start; margin-bottom: 10px; }
+    .card-head strong { font-size: 16px; overflow-wrap: anywhere; }
+    .badge { display: inline-block; border-radius: 6px; padding: 4px 8px; background: rgba(78,225,160,.09); color: var(--accent); font-size: 12px; white-space: nowrap; }
+    .badge.close { color: var(--warning); background: rgba(243,201,105,.08); }
+    .event-wallet { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; margin-bottom: 13px; }
+    .event-values { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 0; }
+    .event-values dt { color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+    .event-values dd { font-size: 14px; margin: 0; overflow-wrap: anywhere; }
+    .card-foot { flex-wrap: wrap; justify-content: space-between; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); margin-top: 13px; padding-top: 11px; }
+    .footer-note { margin-top: 20px; color: var(--muted); font-size: 12px; line-height: 1.8; }
+    #toasts { position: fixed; right: 18px; bottom: 18px; z-index: 30; width: min(360px, calc(100vw - 36px)); display: grid; gap: 8px; pointer-events: none; }
+    .toast { padding: 15px 17px; background: #16392a; color: var(--text); border: 1px solid var(--accent); border-radius: 12px; box-shadow: 0 10px 35px #0008; line-height: 1.7; font-size: 13px; overflow-wrap: anywhere; }
+    @media (max-width: 760px) {
+      main { width: calc(100% - 20px); padding-top: 23px; }
+      header { display: block; }
+      .live { display: inline-block; margin-top: 16px; }
+      .overview { grid-template-columns: 1fr 1fr; }
+      .panel { padding: 16px; }
+      .wallet-editor { grid-template-columns: 1fr auto; }
+      .wallet-editor .field:first-child { grid-column: 1 / -1; }
+      .wallet-editor .field:nth-child(2) { grid-column: 1 / -1; }
+      .events { grid-template-columns: 1fr; }
+      .interval { flex-wrap: wrap; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="eyebrow">HYPERLIQUID MONITOR</div>
+        <h1>地址开平仓监控</h1>
+        <p class="description">关注地址的实际成交，开仓、平仓、加减仓和反手会生成通知卡片。查看原生合约与 HIP-3 市场的所有当前仓位。</p>
+        <nav aria-label="页面导航"><a href="/admin">价格监控配置</a><a href="/alert">电话告警记录</a><a href="/">服务状态</a></nav>
+      </div>
+      <div id="live" class="live" role="status">正在连接…</div>
+    </header>
+
+    <div class="tabs" role="tablist" aria-label="地址监控页面">
+      <button id="dashboardTab" class="tab" type="button" role="tab" aria-selected="true" aria-controls="dashboardPanel">监控看板</button>
+      <button id="configTab" class="tab" type="button" role="tab" aria-selected="false" aria-controls="configPanel" tabindex="-1">监控配置<span id="configTabDirty" class="tab-dirty" hidden>未保存</span></button>
+    </div>
+    <div id="connectionNotice" class="notice" role="status" aria-live="polite"></div>
+    <div id="runtimeNotice" class="notice" role="status" aria-live="polite"></div>
+
+    <div id="dashboardPanel" role="tabpanel" aria-labelledby="dashboardTab" tabindex="0">
+      <section class="overview" aria-label="监控概览">
+        <div class="metric"><span>已启用地址</span><strong id="metricWallets">—</strong></div>
+        <div class="metric"><span>成交检查间隔</span><strong id="metricPoll">—</strong><span id="effectivePollNote" class="hint"></span></div>
+        <div class="metric"><span>当前仓位</span><strong id="metricPositions">—</strong></div>
+        <div class="metric"><span>最近一轮（北京）</span><strong id="metricCycle">—</strong></div>
+      </section>
+
+      <section class="panel" aria-labelledby="positionsTitle">
+        <div class="section-head">
+          <div><h2 id="positionsTitle">当前所有仓位</h2><p class="description">点击地址展开该地址的全部仓位；自动更新会保留展开状态。</p></div>
+          <div class="filters">
+            <div class="field"><label for="walletFilter">查看地址（同时筛选通知）</label><select id="walletFilter"><option value="">全部地址</option></select></div>
+            <button id="refreshPositions" class="btn" type="button" disabled>立即刷新持仓</button>
+          </div>
+        </div>
+        <div id="walletPositions" class="wallet-positions"><div class="empty">正在加载地址持仓…</div></div>
+        <div id="positionsNotice" class="notice" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="eventsTitle">
+        <div class="section-head"><div><h2 id="eventsTitle">开平仓通知</h2><p class="description">最新成交排在最前，最多展示 100 张卡片；页面每 5 秒同步一次，新增成交会在右下角提示。</p></div><span id="eventCount" class="muted">—</span></div>
+        <div id="events" class="events"><div class="empty">正在加载通知…</div></div>
+      </section>
+    </div>
+
+    <div id="configPanel" role="tabpanel" aria-labelledby="configTab" tabindex="0" hidden>
+      <section class="panel" aria-labelledby="configTitle">
+        <div class="section-head">
+          <div><h2 id="configTitle">监控配置</h2><p class="description">添加公开钱包地址，保存后立即生效。首次启用只监控此后发生的成交。地址较多时会自动延长间隔，每轮完成后再次计时。</p></div>
+          <button id="addButton" class="btn" type="button" disabled>＋ 添加地址</button>
+        </div>
+        <form id="configForm">
+          <div id="walletEditors"><div class="empty">正在加载配置…</div></div>
+          <div class="toolbar">
+            <div class="interval">
+              <label for="pollInterval">检查间隔（秒）</label>
+              <input id="pollInterval" type="number" min="5" max="300" step="1" value="15" required>
+              <span id="dirty" role="status"></span>
+            </div>
+            <div class="actions"><button id="reloadButton" class="btn" type="button">重新载入配置</button><button id="saveButton" class="btn primary" type="submit" disabled>保存并生效</button></div>
+          </div>
+        </form>
+        <div id="configSyncNotice" class="notice" role="status" aria-live="polite"></div>
+        <div id="configNotice" class="notice" role="status" aria-live="polite"></div>
+      </section>
+    </div>
+    <p class="footer-note">“下单”以实际成交为准，未成交挂单不生成开平仓通知。暂停地址后停止自动监控，仍可手动刷新持仓。页面中的时间均为北京时间。</p>
+  </main>
+  <div id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
+  <script>
+    "use strict";
+    const byId = id => document.getElementById(id);
+    const actions = { open: "开仓", increase: "加仓", reduce: "减仓", close: "平仓", reverse: "反手" };
+    const sideNames = { long: "多", short: "空" };
+    let draft = [];
+    let persisted = [];
+    let runtime = { wallets: {}, events: [], running: false };
+    let dirty = false;
+    let saving = false;
+    let configuredInterval = 15;
+    let initializedEvents = false;
+    let seenEventIds = new Set();
+    let runtimeRequest = null;
+    let configReady = false;
+    let savedConfigKey = null;
+    let savedConfigVersion = null;
+    let draftBaseKey = null;
+    let draftBaseVersion = null;
+    let editGeneration = 0;
+    let configSyncEpoch = 0;
+    const positionViews = new Map();
+    const positionRequests = new Set();
+    const positionNotices = new Map();
+    const pageTabs = [
+      { button: byId("dashboardTab"), panel: byId("dashboardPanel") },
+      { button: byId("configTab"), panel: byId("configPanel") },
+    ];
+
+    function selectTab(selectedIndex, moveFocus = false) {
+      pageTabs.forEach(({ button, panel }, index) => {
+        const selected = index === selectedIndex;
+        button.setAttribute("aria-selected", String(selected));
+        button.tabIndex = selected ? 0 : -1;
+        panel.hidden = !selected;
+        if (selected && moveFocus) button.focus();
+      });
+    }
+
+    pageTabs.forEach(({ button }, index) => {
+      button.addEventListener("click", () => selectTab(index));
+      button.addEventListener("keydown", event => {
+        let nextIndex;
+        if (event.key === "ArrowRight") nextIndex = (index + 1) % pageTabs.length;
+        else if (event.key === "ArrowLeft") nextIndex = (index + pageTabs.length - 1) % pageTabs.length;
+        else if (event.key === "Home") nextIndex = 0;
+        else if (event.key === "End") nextIndex = pageTabs.length - 1;
+        else return;
+        event.preventDefault();
+        selectTab(nextIndex, true);
+      });
+    });
+
+    function element(tag, text, className) {
+      const node = document.createElement(tag);
+      if (text !== undefined && text !== null) node.textContent = String(text);
+      if (className) node.className = className;
+      return node;
+    }
+
+    async function api(path, options = {}, timeoutMs = 20000) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(path, { ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) }, signal: controller.signal, cache: "no-store" });
+        let payload;
+        try { payload = await response.json(); } catch (_) { throw new Error(`服务返回了无法解析的内容（${response.status}）`); }
+        if (!response.ok) {
+          const detail = typeof payload.detail === "string" ? payload.detail : JSON.stringify(payload.detail || "请求失败");
+          const error = new Error(`${detail}（${response.status}）`);
+          error.status = response.status;
+          throw error;
+        }
+        return payload;
+      } catch (error) {
+        if (error.name === "AbortError") throw new Error("请求超时，请稍后重试");
+        throw error;
+      } finally { clearTimeout(timer); }
+    }
+
+    function notice(id, message = "", type = "error") {
+      const node = byId(id);
+      node.textContent = message;
+      node.className = message ? `notice show ${type}` : "notice";
+    }
+
+    function setDirty(value = true) {
+      dirty = value;
+      if (value) editGeneration += 1;
+      byId("dirty").textContent = dirty ? "有未保存的修改" : "";
+      byId("configTabDirty").hidden = !dirty;
+      updateConfigSyncNotice();
+    }
+
+    function updateConfigSyncNotice() {
+      const conflict = dirty && savedConfigKey !== draftBaseKey;
+      notice("configSyncNotice", conflict
+        ? "监控配置已在其他页面更新，看板已同步。当前草稿已保留，请先点击“重新载入配置”，再修改并保存。"
+        : "", "warning");
+    }
+
+    function applySavedConfig(config, replaceDraft = !dirty && !saving) {
+      const wallets = config.wallets.map(wallet => ({
+        address: wallet.address, label: wallet.label || "", enabled: wallet.enabled,
+      }));
+      const interval = config.poll_interval_seconds || 15;
+      const key = JSON.stringify({ poll_interval_seconds: interval, wallets });
+      const changed = !configReady || savedConfigKey !== key;
+      persisted = wallets;
+      configuredInterval = interval;
+      savedConfigKey = key;
+      savedConfigVersion = config.config?.version || null;
+      configReady = true;
+      if (replaceDraft && (changed || dirty || draftBaseKey !== key)) {
+        draft = wallets.map(wallet => ({ ...wallet }));
+        draftBaseKey = key;
+        draftBaseVersion = savedConfigVersion;
+        byId("pollInterval").value = interval;
+        setDirty(false);
+        renderEditors();
+      } else if (draftBaseKey === key) {
+        // A service restart may reset the revision while keeping the saved configuration.
+        draftBaseVersion = savedConfigVersion;
+      }
+      if (changed) renderFilter();
+      byId("saveButton").disabled = saving || !configReady;
+      byId("addButton").disabled = saving || !configReady || draft.length >= 20;
+      updateConfigSyncNotice();
+    }
+
+    function shortAddress(address) {
+      const value = String(address || "");
+      return value.length > 18 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value;
+    }
+
+    function walletName(wallet) {
+      return wallet.label ? `${wallet.label} · ${shortAddress(wallet.address)}` : shortAddress(wallet.address);
+    }
+
+    function number(value) {
+      if (value === null || value === undefined || value === "") return "—";
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric)) return "—";
+      if (numeric !== 0 && Math.abs(numeric) < 0.00000001) return numeric.toExponential(4);
+      return numeric.toLocaleString("zh-CN", { maximumFractionDigits: 8 });
+    }
+
+    function time(value, onlyTime = false) {
+      if (value === null || value === undefined || value === "") return "—";
+      const numeric = typeof value === "number" ? value : Number(value);
+      const date = new Date(Number.isFinite(numeric) ? (numeric < 1e11 ? numeric * 1000 : numeric) : value);
+      if (Number.isNaN(date.getTime())) return "—";
+      return date.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", ...(onlyTime ? {} : { year: "numeric", month: "2-digit", day: "2-digit" }), hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+    }
+
+    function numericColor(node, value) {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric) && numeric !== 0) node.classList.add(numeric > 0 ? "positive" : "negative");
+    }
+
+    function renderEditors() {
+      const container = byId("walletEditors");
+      container.replaceChildren();
+      if (!draft.length) container.append(element("div", "尚未配置地址。点击“添加地址”开始监控。", "empty"));
+      draft.forEach((wallet, index) => {
+        const row = element("div", null, "wallet-editor");
+        const addressField = element("div", null, "field");
+        const addressId = `address-${index}`;
+        const addressLabel = element("label", `钱包地址 ${index + 1}`);
+        addressLabel.htmlFor = addressId;
+        const address = element("input", null, "address");
+        address.id = addressId; address.type = "text"; address.required = true;
+        address.pattern = "0x[a-fA-F0-9]{40}"; address.maxLength = 42;
+        address.placeholder = "0x…（40 位十六进制地址）"; address.autocomplete = "off";
+        address.spellcheck = false; address.value = wallet.address; address.disabled = saving;
+        address.addEventListener("input", () => { draft[index].address = address.value; setDirty(); });
+        addressField.append(addressLabel, address);
+        const labelField = element("div", null, "field");
+        const labelLabel = element("label", "备注（可选）");
+        labelLabel.htmlFor = `label-${index}`;
+        const label = element("input");
+        label.id = labelLabel.htmlFor; label.type = "text"; label.maxLength = 80;
+        label.placeholder = "例如：关注的交易员"; label.value = wallet.label || ""; label.disabled = saving;
+        label.addEventListener("input", () => { draft[index].label = label.value; setDirty(); });
+        labelField.append(labelLabel, label);
+        const toggle = element("label", null, "toggle");
+        const enabled = element("input");
+        enabled.type = "checkbox"; enabled.checked = wallet.enabled; enabled.disabled = saving;
+        enabled.addEventListener("change", () => { draft[index].enabled = enabled.checked; setDirty(); });
+        toggle.append(enabled, document.createTextNode("启用监控"));
+        const remove = element("button", "移除", "btn danger");
+        remove.type = "button"; remove.disabled = saving;
+        remove.setAttribute("aria-label", `移除地址 ${index + 1}`);
+        remove.addEventListener("click", () => { draft.splice(index, 1); setDirty(); renderEditors(); });
+        row.append(addressField, labelField, toggle, remove);
+        container.append(row);
+      });
+      byId("addButton").disabled = saving || !configReady || draft.length >= 20;
+    }
+
+    function renderFilter() {
+      const select = byId("walletFilter");
+      const selected = select.value;
+      select.replaceChildren(new Option("全部地址", ""));
+      for (const wallet of persisted) select.append(new Option(walletName(wallet), wallet.address));
+      if (persisted.some(wallet => wallet.address === selected)) select.value = selected;
+      syncRefreshButtons();
+    }
+
+    function createPositionView(address) {
+      const details = element("details", null, "wallet-position");
+      details.dataset.address = address;
+      const summary = element("summary", null, "wallet-summary");
+      const identity = element("div", null, "wallet-identity");
+      const name = element("strong", null, "wallet-name");
+      const fullAddress = element("span", address, "wallet-address address");
+      const meta = element("div", null, "wallet-meta");
+      const enabled = element("span");
+      const count = element("span");
+      const updated = element("span");
+      const hint = element("div", null, "wallet-hint");
+      meta.append(enabled, count, updated);
+      identity.append(name, fullAddress, meta, hint);
+      summary.append(identity);
+      const content = element("div", null, "wallet-content");
+      const contentHead = element("div", null, "wallet-content-head");
+      contentHead.append(element("span", "当前合约仓位 · HL 原生与 HIP-3", "muted"));
+      const refresh = element("button", "立即刷新持仓", "btn wallet-refresh");
+      refresh.type = "button";
+      refresh.dataset.address = address;
+      refresh.addEventListener("click", () => refreshPositions(address));
+      contentHead.append(refresh);
+      const tableWrap = element("div", null, "table-wrap");
+      const table = element("table");
+      table.setAttribute("aria-label", `${address} 的当前仓位`);
+      const head = element("thead");
+      const headings = element("tr");
+      for (const label of ["品种 / 市场", "方向", "数量", "开仓均价", "仓位价值 (USD)", "未实现盈亏 (USD)", "杠杆", "强平价"]) headings.append(element("th", label));
+      head.append(headings);
+      const body = element("tbody");
+      table.append(head, body);
+      tableWrap.append(table);
+      const feedback = element("div", null, "notice");
+      feedback.setAttribute("role", "status");
+      feedback.setAttribute("aria-live", "polite");
+      content.append(contentHead, tableWrap, feedback);
+      details.append(summary, content);
+      return { details, name, enabled, count, updated, hint, refresh, body, feedback };
+    }
+
+    function syncRefreshButtons() {
+      const selected = byId("walletFilter").value;
+      const busy = positionRequests.has(selected);
+      byId("refreshPositions").disabled = !selected || busy;
+      byId("refreshPositions").textContent = busy ? "正在刷新…" : "立即刷新持仓";
+      for (const [address, view] of positionViews) {
+        const refreshing = positionRequests.has(address);
+        view.refresh.disabled = refreshing;
+        view.refresh.textContent = refreshing ? "正在刷新…" : "立即刷新持仓";
+      }
+    }
+
+    function renderPositions() {
+      const container = byId("walletPositions");
+      const active = new Set(persisted.map(wallet => wallet.address));
+      for (const [address, view] of positionViews) {
+        if (!active.has(address)) {
+          view.details.remove();
+          positionViews.delete(address);
+          positionNotices.delete(address);
+        }
+      }
+      // Keep each details/summary/button node in place so polling preserves focus and open state.
+      if (persisted.length && container.querySelector(":scope > .empty")) container.querySelector(":scope > .empty").remove();
+      const selected = byId("walletFilter").value;
+      persisted.forEach((configured, index) => {
+        let view = positionViews.get(configured.address);
+        if (!view) {
+          view = createPositionView(configured.address);
+          positionViews.set(configured.address, view);
+        }
+        if (container.children[index] !== view.details) container.insertBefore(view.details, container.children[index] || null);
+        view.details.hidden = Boolean(selected && selected !== configured.address);
+        const snapshot = runtime.wallets?.[configured.address] || {};
+        const wallet = { ...configured, ...snapshot };
+        const positions = Array.isArray(wallet.positions) ? wallet.positions : [];
+        view.name.textContent = wallet.label || "未备注地址";
+        view.enabled.textContent = configured.enabled ? "监控已启用" : "监控已暂停";
+        view.count.textContent = wallet.positions_updated_at ? `${positions.length} 个仓位` : "仓位待查询";
+        view.updated.textContent = wallet.positions_updated_at ? `更新于 ${time(wallet.positions_updated_at)}` : "尚未获取持仓";
+        const failure = wallet.positions_error || wallet.last_error;
+        let hint = "";
+        if (failure) {
+          hint = `最近错误：${failure}${wallet.positions_updated_at ? "；展开查看上次成功获取的数据" : ""}`;
+        } else if (!wallet.positions_updated_at && configured.enabled) {
+          hint = "正在等待首次检查，也可展开后立即刷新持仓。";
+        } else if (wallet.positions_updated_at && Date.now() / 1000 - wallet.positions_updated_at > Math.max(Number(runtime.effective_poll_interval_seconds) || configuredInterval, 15) * 2) {
+          hint = "持仓数据较旧，可展开后立即刷新。";
+        }
+        view.details.classList.toggle("error", Boolean(failure || hint.startsWith("持仓数据较旧")));
+        view.hint.textContent = hint;
+        view.hint.className = `wallet-hint ${failure ? "negative" : "muted"}`;
+        view.hint.hidden = !hint;
+        const feedback = positionNotices.get(configured.address);
+        view.feedback.textContent = feedback?.message || "";
+        view.feedback.className = feedback ? `notice show ${feedback.type}` : "notice";
+        view.body.replaceChildren();
+        for (const position of positions) {
+          const row = element("tr");
+          const market = element("td", position.coin || position.symbol || "—");
+          market.append(element("div", position.dex ? `HIP-3 · ${position.dex}` : "HL 原生合约", "muted"));
+          const side = element("td", position.side === "long" ? "做多" : position.side === "short" ? "做空" : "—", position.side === "long" ? "positive" : position.side === "short" ? "negative" : "");
+          const pnl = element("td", number(position.unrealized_pnl), "num");
+          numericColor(pnl, position.unrealized_pnl);
+          const leverage = position.leverage;
+          const leverageValue = leverage && typeof leverage === "object" ? leverage.value : leverage;
+          const leverageType = position.leverage_type || leverage?.type;
+          const leverageText = leverageValue === null || leverageValue === undefined ? "—" : `${number(leverageValue)}×${leverageType === "cross" ? " 全仓" : leverageType === "isolated" ? " 逐仓" : ""}`;
+          row.append(market, side, element("td", number(position.size), "num"), element("td", number(position.entry_price), "num"), element("td", number(position.position_value), "num"), pnl, element("td", leverageText), element("td", number(position.liquidation_price), "num"));
+          view.body.append(row);
+        }
+        if (!positions.length) {
+          const emptyRow = element("tr");
+          const message = wallet.positions_updated_at ? "该地址当前没有持仓。" : failure ? "持仓获取失败，请点击“立即刷新持仓”重试。" : configured.enabled ? "正在等待首次持仓查询，也可立即刷新。" : "该地址已暂停监控，可手动刷新查看持仓。";
+          const cell = element("td", message, "empty");
+          cell.colSpan = 8;
+          emptyRow.append(cell);
+          view.body.append(emptyRow);
+        }
+      });
+      if (!persisted.length) {
+        container.replaceChildren(element("div", "添加并保存地址后即可展开查看各地址的仓位。", "empty"));
+      }
+      syncRefreshButtons();
+    }
+
+    function eventId(event) {
+      return String(event.id ?? [event.address, event.coin, event.trade_id, event.order_id, event.timestamp, event.action].join("|"));
+    }
+
+    function notifyNewEvents(events) {
+      const added = events.filter(event => !seenEventIds.has(eventId(event)));
+      if (initializedEvents && added.length) {
+        added.slice(0, 3).reverse().forEach(event => {
+          const toast = element("div", `${event.label || shortAddress(event.address)}：${event.coin || event.symbol || ""} ${actions[event.action] || "成交"}${sideNames[event.side] || ""}，数量 ${number(event.size)}，价格 ${number(event.price)}`, "toast");
+          byId("toasts").append(toast);
+          setTimeout(() => toast.remove(), 8000);
+        });
+        if (added.length > 3) {
+          const toast = element("div", `还有 ${added.length - 3} 笔新增成交，可在下方通知卡片查看。`, "toast");
+          byId("toasts").append(toast);
+          setTimeout(() => toast.remove(), 8000);
+        }
+        while (byId("toasts").children.length > 4) byId("toasts").firstElementChild.remove();
+      }
+      initializedEvents = true;
+      for (const event of events) seenEventIds.add(eventId(event));
+      if (seenEventIds.size > 2000) seenEventIds = new Set(Array.from(seenEventIds).slice(-1000));
+    }
+
+    function renderEvents() {
+      const selected = byId("walletFilter").value;
+      const events = (Array.isArray(runtime.events) ? runtime.events : []).filter(event => !selected || event.address === selected).slice(0, 100);
+      const container = byId("events");
+      container.replaceChildren();
+      byId("eventCount").textContent = `${events.length} 条`;
+      if (!events.length) container.append(element("div", "暂无开平仓通知。开始监控后，新成交会在这里显示。", "empty"));
+      for (const event of events) {
+        const card = element("article", null, "event-card");
+        const header = element("div", null, "card-head");
+        const actionText = `${actions[event.action] || "成交"}${sideNames[event.side] || ""}`;
+        header.append(element("strong", event.coin || event.symbol || "未知品种"), element("span", actionText, ["reduce", "close"].includes(event.action) ? "badge close" : "badge"));
+        const wallet = element("div", event.label ? `${event.label} · ${event.address}` : event.address, "event-wallet address");
+        const values = element("dl", null, "event-values");
+        for (const [name, value] of [["成交数量", event.size], ["成交价格", event.price], ["已实现盈亏 (USD)", event.closed_pnl]]) {
+          const group = element("div");
+          const detail = element("dd", number(value), "num");
+          if (name.startsWith("已实现")) numericColor(detail, value);
+          group.append(element("dt", name), detail); values.append(group);
+        }
+        const positionChange = element("div", null, "muted");
+        if (event.start_position !== undefined && event.end_position !== undefined) {
+          positionChange.textContent = `仓位变化：${number(event.start_position)} → ${number(event.end_position)}（正数为多，负数为空）`;
+        }
+        const footer = element("div", null, "card-foot");
+        footer.append(element("span", `${time(event.beijing_time || event.timestamp)}（北京）`));
+        const orderId = event.order_id === null || event.order_id === undefined ? "" : `订单 ${event.order_id}`;
+        if (orderId) footer.append(element("span", orderId));
+        card.append(header, wallet, values, positionChange, footer); container.append(card);
+      }
+    }
+
+    function renderRuntime() {
+      const enabledCount = persisted.filter(wallet => wallet.enabled).length;
+      byId("metricWallets").textContent = `${enabledCount} / ${persisted.length}`;
+      byId("metricPoll").textContent = `${configuredInterval} 秒`;
+      const effectiveInterval = Number(runtime.effective_poll_interval_seconds) || configuredInterval;
+      byId("effectivePollNote").textContent = effectiveInterval > configuredInterval ? `实际至少 ${effectiveInterval} 秒（按地址数调整）` : "";
+      const snapshots = Object.values(runtime.wallets || {});
+      byId("metricPositions").textContent = snapshots.some(wallet => wallet.positions_updated_at) ? snapshots.reduce((sum, wallet) => sum + (wallet.positions?.length || 0), 0) : "—";
+      byId("metricCycle").textContent = time(runtime.last_cycle_at, true);
+      const live = byId("live");
+      const stale = runtime.running && runtime.last_cycle_at && Date.now() / 1000 - runtime.last_cycle_at > Math.max(effectiveInterval * 3, 60);
+      live.className = `live${runtime.running ? stale ? " stale" : " running" : ""}`;
+      live.textContent = runtime.running ? stale ? "运行中 · 检查耗时较长" : enabledCount ? "监控运行中" : "运行中 · 等待启用地址" : "监控线程未运行";
+      notice("runtimeNotice", runtime.last_error ? `最近监控错误：${runtime.last_error}` : "", "warning");
+      renderPositions(); renderEvents();
+    }
+
+    async function refreshRuntime() {
+      if (runtimeRequest) return runtimeRequest;
+      const requestEpoch = configSyncEpoch;
+      runtimeRequest = (async () => {
+        try {
+          const snapshot = await api("/api/wallets");
+          // Ignore snapshots requested before a completed explicit reload or save.
+          if (requestEpoch !== configSyncEpoch) return;
+          runtime = snapshot;
+          applySavedConfig({
+            wallets: Object.values(snapshot.wallets || {}),
+            poll_interval_seconds: snapshot.poll_interval_seconds,
+            config: snapshot.config,
+          });
+          notifyNewEvents(Array.isArray(runtime.events) ? runtime.events : []);
+          notice("connectionNotice"); renderRuntime();
+        } catch (error) {
+          notice("connectionNotice", `页面同步失败：${error.message}。当前显示的是上次获取的数据，5 秒后重试。`);
+          byId("live").className = "live stale"; byId("live").textContent = "连接中断";
+        } finally { runtimeRequest = null; }
+      })();
+      return runtimeRequest;
+    }
+
+    async function loadConfig(allowDiscard = false) {
+      if (dirty && !allowDiscard && !window.confirm("重新载入会放弃尚未保存的配置，是否继续？")) return;
+      const requestEpoch = configSyncEpoch;
+      const startingEditGeneration = editGeneration;
+      byId("reloadButton").disabled = true;
+      try {
+        const config = await api("/api/wallets/config");
+        if (requestEpoch !== configSyncEpoch) return;
+        configSyncEpoch += 1;
+        applySavedConfig(config, startingEditGeneration === editGeneration);
+        renderRuntime();
+        notice("configNotice", config.config?.error ? `配置加载存在问题：${config.config.error}。修正后保存即可恢复。` : "", "warning");
+      } catch (error) { notice("configNotice", `配置加载失败：${error.message}`); }
+      finally { byId("reloadButton").disabled = false; }
+    }
+
+    async function saveConfig(event) {
+      event.preventDefault();
+      if (saving || !byId("configForm").reportValidity()) return;
+      if (!configReady) return;
+      if (draftBaseKey !== savedConfigKey) {
+        updateConfigSyncNotice();
+        return;
+      }
+      const payload = { poll_interval_seconds: Number(byId("pollInterval").value), wallets: draft.map(wallet => ({ address: wallet.address.trim().toLowerCase(), label: String(wallet.label || "").trim(), enabled: Boolean(wallet.enabled) })) };
+      if (draftBaseVersion) payload.expected_version = draftBaseVersion;
+      saving = true;
+      byId("saveButton").disabled = true; byId("reloadButton").disabled = true; byId("pollInterval").disabled = true;
+      byId("saveButton").textContent = "正在保存…";
+      notice("configNotice"); renderEditors();
+      try {
+        const result = await api("/api/wallets/config", { method: "PUT", body: JSON.stringify(payload) });
+        configSyncEpoch += 1;
+        applySavedConfig(result, true);
+        // The backend has accepted this draft, including a possible no-op save.
+        setDirty(false);
+        renderRuntime();
+        notice("configNotice", result.message || "配置已保存并立即生效，无需重启服务。", "success");
+        await refreshRuntime();
+      } catch (error) {
+        if (error.status === 409) await refreshRuntime();
+        notice("configNotice", `保存失败：${error.message}`);
+      }
+      finally {
+        saving = false; byId("saveButton").disabled = !configReady; byId("reloadButton").disabled = false;
+        byId("pollInterval").disabled = false; byId("saveButton").textContent = "保存并生效"; renderEditors();
+      }
+    }
+
+    async function refreshPositions(address = byId("walletFilter").value) {
+      if (!address || positionRequests.has(address)) return;
+      positionRequests.add(address);
+      positionNotices.delete(address);
+      notice("positionsNotice");
+      renderPositions();
+      try {
+        const result = await api(`/api/wallets/${encodeURIComponent(address)}/positions?refresh=true`, {}, 120000);
+        if (result.positions_error) throw new Error(result.positions_error);
+        if (!persisted.some(wallet => wallet.address === address)) return;
+        if (Array.isArray(result.positions)) {
+          runtime.wallets = runtime.wallets || {};
+          runtime.wallets[address] = { ...(runtime.wallets[address] || {}), ...result };
+          renderRuntime();
+        }
+        await refreshRuntime();
+        positionNotices.set(address, { message: "已获取该地址的最新持仓。", type: "success" });
+      } catch (error) {
+        if (persisted.some(wallet => wallet.address === address)) {
+          positionNotices.set(address, { message: `持仓刷新失败：${error.message}`, type: "error" });
+          runtime.wallets = runtime.wallets || {};
+          runtime.wallets[address] = { ...(runtime.wallets[address] || {}), positions_error: error.message };
+        }
+      } finally {
+        positionRequests.delete(address);
+        renderPositions();
+      }
+    }
+
+    byId("addButton").addEventListener("click", () => {
+      if (draft.length >= 20) return;
+      draft.push({ address: "", label: "", enabled: true }); setDirty(); renderEditors();
+      byId(`address-${draft.length - 1}`).focus();
+    });
+    byId("pollInterval").addEventListener("input", () => setDirty());
+    byId("reloadButton").addEventListener("click", () => loadConfig());
+    byId("configForm").addEventListener("submit", saveConfig);
+    byId("refreshPositions").addEventListener("click", () => refreshPositions());
+    byId("walletFilter").addEventListener("change", () => { notice("positionsNotice"); renderPositions(); renderEvents(); });
+    window.addEventListener("beforeunload", event => { if (dirty) { event.preventDefault(); event.returnValue = ""; } });
+
+    async function poll() { await refreshRuntime(); setTimeout(poll, 5000); }
+    loadConfig(); poll();
+  </script>
+</body>
+</html>
