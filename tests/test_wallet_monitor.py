@@ -35,6 +35,15 @@ def fill(trade_id, timestamp, *, start="0", side="B", size="1", coin="BTC"):
     }
 
 
+class FakeResponse:
+    """最小化的 fwalert 响应替身：只提供 raise_for_status 与 status_code。"""
+
+    status_code = 200
+
+    def raise_for_status(self):
+        return None
+
+
 def raw_position(coin, size):
     return {
         "position": {
@@ -376,6 +385,212 @@ class WalletMonitorTests(unittest.TestCase):
     def test_get_positions_rejects_unconfigured_address(self):
         with self.assertRaises(ConfigValidationError):
             self.monitor.get_positions(OTHER_ADDRESS)
+
+    # ---------------- 开单 / 关单电话告警 ----------------
+
+    def enable_alerts(self, cooldown=600, phone_enabled=True, url="https://fwalert.example/call"):
+        self.monitor.replace_config(self.config([{
+            "address": ADDRESS, "label": "主账户", "enabled": True,
+            "alert_enabled": phone_enabled, "alert_cooldown_seconds": cooldown,
+        }]))
+        self.monitor.fwalert_url = url
+        self.alert_records = []
+        self.monitor._alert_recorder = self.alert_records.append
+        return self.alert_records
+
+    def test_per_wallet_alert_defaults_and_validation(self):
+        wallet = self.monitor.get_config()["wallets"][0]
+        self.assertEqual(wallet["alert_enabled"], True)
+        self.assertEqual(wallet["alert_cooldown_seconds"], 600)
+
+        for wallets in (
+            [{"address": ADDRESS, "alert_enabled": "yes"}],
+            [{"address": ADDRESS, "alert_cooldown_seconds": 10}],
+            [{"address": ADDRESS, "alert_cooldown_seconds": 86_401}],
+            [{"address": ADDRESS, "alert_cooldown_seconds": True}],
+            [{"address": ADDRESS, "alert_cooldown_seconds": "600"}],
+        ):
+            with self.subTest(wallets=wallets):
+                with self.assertRaises(ConfigValidationError):
+                    self.monitor.replace_config(self.config(wallets))
+                self.assertEqual(
+                    self.monitor.get_config()["wallets"][0]["alert_cooldown_seconds"], 600,
+                )
+
+        saved = self.monitor.replace_config(self.config([
+            {"address": ADDRESS, "label": "主账户", "enabled": True,
+             "alert_enabled": False, "alert_cooldown_seconds": 1800},
+            {"address": OTHER_ADDRESS, "label": "第二个", "enabled": True,
+             "alert_enabled": True, "alert_cooldown_seconds": 120},
+        ]))
+        expected = [(False, 1800), (True, 120)]
+        self.assertEqual(
+            [(w["alert_enabled"], w["alert_cooldown_seconds"]) for w in saved["wallets"]], expected,
+        )
+        self.assertEqual(
+            [(w["alert_enabled"], w["alert_cooldown_seconds"])
+             for w in self.new_monitor().get_config()["wallets"]],
+            expected,
+        )
+
+    def test_legacy_global_alerts_block_still_applies_to_unset_wallets(self):
+        saved = self.monitor.replace_config({
+            **self.config(),
+            "alerts": {"phone_enabled": False, "cooldown_seconds": 900},
+        })
+        self.assertEqual(saved["wallets"][0]["alert_enabled"], False)
+        self.assertEqual(saved["wallets"][0]["alert_cooldown_seconds"], 900)
+        # 新口径只写地址级字段，不再回写全局块
+        self.assertNotIn("alerts", saved)
+
+    def test_open_dials_shared_fwalert_url_and_records_the_call(self):
+        records = self.enable_alerts()
+        with patch.object(wm.requests, "get", return_value=FakeResponse()) as dial:
+            self.monitor.run_cycle()
+            timestamp = self.tick()
+            self.fills = [fill(1, timestamp - 1000)]
+            self.monitor.run_cycle()
+
+        self.assertEqual(dial.call_count, 1)
+        self.assertEqual(dial.call_args.args[0], "https://fwalert.example/call")
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["event"], "wallet_open_close")
+        self.assertEqual(record["status_code"], 200)
+        self.assertEqual(record["market"], "主账户")
+        self.assertEqual(record["address"], ADDRESS)
+        self.assertEqual(record["symbol"], "BTC")
+        self.assertEqual(record["actions"], ["open"])
+        self.assertIn("开仓 BTC 多 1 @ 60000", record["detail"])
+        self.assertIn(record["event_ids"][0], [event["id"] for event in self.events()])
+        # 事件卡片上要能看出这一笔拨过电话，并且标记随状态文件持久化
+        mark = self.events()[0]["alert"]
+        self.assertEqual(mark["status"], "dialled")
+        self.assertEqual(mark["at"], self.clock)
+        self.assertEqual(self.new_monitor().get_events()[0]["alert"]["status"], "dialled")
+
+    def test_close_also_dials_and_cooldown_limits_one_call_per_ten_minutes(self):
+        records = self.enable_alerts()
+        with patch.object(wm.requests, "get", return_value=FakeResponse()) as dial:
+            self.monitor.run_cycle()
+            timestamp = self.tick()
+            self.fills = [fill(1, timestamp - 1000)]
+            self.monitor.run_cycle()  # 开仓 → 拨号 1
+            timestamp = self.tick(5 * 60)
+            self.fills = [fill(2, timestamp - 1000, start="1", side="A")]
+            self.monitor.run_cycle()  # 5 分钟后平仓 → 冷却抑制
+            timestamp = self.tick(6 * 60)
+            self.fills = [fill(3, timestamp - 1000)]
+            self.monitor.run_cycle()  # 累计 11 分钟后再开仓 → 拨号 2
+
+        self.assertEqual(dial.call_count, 2)
+        self.assertEqual([record["status_code"] for record in records], [200, 200])
+        self.assertEqual([event["action"] for event in self.events()], ["open", "close", "open"])
+        # 卡片上的电话标记：开仓拨号、5 分钟后的平仓被冷却抑制、11 分钟后的开仓再拨号
+        self.assertEqual(
+            [(event["action"], event["alert"]["status"]) for event in self.events()],
+            [("open", "dialled"), ("close", "cooldown"), ("open", "dialled")],
+        )
+
+    def test_increase_and_reduce_never_dial(self):
+        records = self.enable_alerts()
+        with patch.object(wm.requests, "get", return_value=FakeResponse()) as dial:
+            self.monitor.run_cycle()
+            timestamp = self.tick()
+            self.fills = [
+                fill(1, timestamp - 2000, start="1", side="B", size="1"),
+                fill(2, timestamp - 1000, start="2", side="A", size="0.5"),
+            ]
+            self.monitor.run_cycle()
+
+        self.assertEqual(dial.call_count, 0)
+        self.assertEqual(records, [])
+        self.assertEqual({event["action"] for event in self.events()}, {"increase", "reduce"})
+        # 加仓/减仓本来就不在告警范围，卡片上不应该出现电话标记
+        self.assertTrue(all("alert" not in event for event in self.events()))
+
+    def test_phone_switch_off_never_dials(self):
+        records = self.enable_alerts(phone_enabled=False)
+        with patch.object(wm.requests, "get", return_value=FakeResponse()) as dial:
+            self.monitor.run_cycle()
+            timestamp = self.tick()
+            self.fills = [fill(1, timestamp - 1000)]
+            self.monitor.run_cycle()
+
+        self.assertEqual(dial.call_count, 0)
+        self.assertEqual(records, [])
+        self.assertEqual([event["action"] for event in self.events()], ["open"])
+        self.assertEqual(self.events()[0]["alert"]["status"], "disabled")
+
+    def test_missing_fwalert_url_records_error_without_dialling(self):
+        records = self.enable_alerts(url="")
+        with patch.object(wm.requests, "get", return_value=FakeResponse()) as dial:
+            self.monitor.run_cycle()
+            timestamp = self.tick()
+            self.fills = [fill(1, timestamp - 1000)]
+            self.monitor.run_cycle()
+
+        self.assertEqual(dial.call_count, 0)
+        self.assertEqual(records[0]["error"], "missing_fwalert_url")
+        self.assertEqual(self.events()[0]["alert"]["status"], "missing_url")
+
+    def test_failed_dial_does_not_consume_the_cooldown(self):
+        records = self.enable_alerts()
+        with patch.object(wm.requests, "get", side_effect=requests.ConnectionError("boom")) as dial:
+            self.monitor.run_cycle()
+            timestamp = self.tick()
+            self.fills = [fill(1, timestamp - 1000)]
+            self.monitor.run_cycle()  # 拨号失败
+            timestamp = self.tick(60)
+            self.fills = [fill(2, timestamp - 1000)]
+            self.monitor.run_cycle()  # 1 分钟后仍应重试拨号
+
+        self.assertEqual(dial.call_count, 2)
+        self.assertEqual([record.get("error") for record in records], ["ConnectionError", "ConnectionError"])
+        self.assertEqual(
+            [event["alert"]["status"] for event in self.events()], ["failed", "failed"],
+        )
+
+    def test_snapshot_exposes_per_wallet_alert_settings(self):
+        self.enable_alerts(cooldown=900)
+        wallet = self.monitor.snapshot()["wallets"][ADDRESS]
+        self.assertEqual(wallet["alert_enabled"], True)
+        self.assertEqual(wallet["alert_cooldown_seconds"], 900)
+
+    def test_each_wallet_uses_its_own_cooldown(self):
+        self.monitor.replace_config(self.config([
+            {"address": ADDRESS, "label": "A", "enabled": True,
+             "alert_enabled": True, "alert_cooldown_seconds": 3600},
+            {"address": OTHER_ADDRESS, "label": "B", "enabled": True,
+             "alert_enabled": True, "alert_cooldown_seconds": 60},
+        ]))
+        self.monitor.fwalert_url = "https://fwalert.example/call"
+        self.alert_records = []
+        self.monitor._alert_recorder = self.alert_records.append
+        fills_by_address = {ADDRESS: [], OTHER_ADDRESS: []}
+        self.fetch_fills.side_effect = (
+            lambda address, start_ms, end_ms: copy.deepcopy(fills_by_address[address])
+        )
+        with patch.object(wm.requests, "get", return_value=FakeResponse()) as dial:
+            self.monitor.run_cycle()
+            timestamp = self.tick()
+            fills_by_address[ADDRESS] = [fill(1, timestamp - 1000)]
+            fills_by_address[OTHER_ADDRESS] = [fill(2, timestamp - 1000)]
+            self.monitor.run_cycle()   # 两个地址各开一仓 → 各拨一通
+            self.assertEqual(dial.call_count, 2)
+            timestamp = self.tick(120)
+            fills_by_address[ADDRESS] = [fill(3, timestamp - 1000)]
+            fills_by_address[OTHER_ADDRESS] = [fill(4, timestamp - 1000)]
+            self.monitor.run_cycle()   # 2 分钟后：A 还在 1 小时冷却里，B 的 60 秒已过
+            self.assertEqual(dial.call_count, 3)
+
+        self.assertEqual(
+            [(record["market"], record["actions"]) for record in self.alert_records],
+            [("A", ["open"]), ("B", ["open"]), ("B", ["open"])],
+        )
+        marks = {(event["address"], event["trade_id"]): event["alert"]["status"] for event in self.events()}
+        self.assertEqual(marks[(ADDRESS, 3)], "cooldown")
+        self.assertEqual(marks[(OTHER_ADDRESS, 4)], "dialled")
 
 
 if __name__ == "__main__":

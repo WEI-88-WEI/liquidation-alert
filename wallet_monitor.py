@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -29,6 +29,12 @@ MAX_WALLETS = 20
 MAX_EVENTS = 1000
 FILL_PAGE_SIZE = 2000
 OVERLAP_MS = 60_000
+# 只有"开单 / 关单"呼叫电话；加仓、减仓仍记录在事件流里，但不拨号。
+ALERT_ACTIONS = {"open", "close", "reverse"}
+ACTION_LABELS = {"open": "开仓", "close": "平仓", "reverse": "反手"}
+DEFAULT_ALERT_COOLDOWN_SECONDS = 600
+MIN_ALERT_COOLDOWN_SECONDS = 30
+MAX_ALERT_COOLDOWN_SECONDS = 86_400
 
 
 class ConfigConflictError(RuntimeError):
@@ -46,12 +52,40 @@ def normalise_address(value: Any) -> str:
     return value.strip().lower()
 
 
+def validate_alert_cooldown(value: Any) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not MIN_ALERT_COOLDOWN_SECONDS <= value <= MAX_ALERT_COOLDOWN_SECONDS
+    ):
+        raise ConfigValidationError(
+            f"电话告警冷却必须是 {MIN_ALERT_COOLDOWN_SECONDS} 到 "
+            f"{MAX_ALERT_COOLDOWN_SECONDS} 之间的整数秒"
+        )
+    return value
+
+
+def legacy_alert_defaults(payload: Any) -> tuple[bool, int]:
+    """兼容 2026-10-28 短暂使用的全局 alerts 配置：未单独设置的地址沿用它。"""
+    enabled, cooldown = True, DEFAULT_ALERT_COOLDOWN_SECONDS
+    if not isinstance(payload, dict):
+        return enabled, cooldown
+    if isinstance(payload.get("phone_enabled"), bool):
+        enabled = payload["phone_enabled"]
+    try:
+        cooldown = validate_alert_cooldown(payload.get("cooldown_seconds", cooldown))
+    except ConfigValidationError:
+        pass
+    return enabled, cooldown
+
+
 def validate_wallet_config(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ConfigValidationError("地址监控配置必须是对象")
     interval = payload.get("poll_interval_seconds", 15)
     if isinstance(interval, bool) or not isinstance(interval, int) or not 5 <= interval <= 300:
         raise ConfigValidationError("轮询间隔必须是 5 到 300 之间的整数秒")
+    legacy_enabled, legacy_cooldown = legacy_alert_defaults(payload.get("alerts"))
     wallets = payload.get("wallets", [])
     if not isinstance(wallets, list) or len(wallets) > MAX_WALLETS:
         raise ConfigValidationError(f"wallets 必须是数组，最多监控 {MAX_WALLETS} 个地址")
@@ -70,7 +104,19 @@ def validate_wallet_config(payload: Any) -> dict[str, Any]:
         enabled = wallet.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ConfigValidationError("enabled 必须是 true 或 false")
-        result.append({"address": address, "label": label.strip(), "enabled": enabled})
+        alert_enabled = wallet.get("alert_enabled", legacy_enabled)
+        if not isinstance(alert_enabled, bool):
+            raise ConfigValidationError("alert_enabled 必须是 true 或 false")
+        alert_cooldown = validate_alert_cooldown(
+            wallet.get("alert_cooldown_seconds", legacy_cooldown)
+        )
+        result.append({
+            "address": address,
+            "label": label.strip(),
+            "enabled": enabled,
+            "alert_enabled": alert_enabled,
+            "alert_cooldown_seconds": alert_cooldown,
+        })
     return {"poll_interval_seconds": interval, "wallets": result}
 
 
@@ -164,10 +210,15 @@ class WalletMonitor:
     def __init__(
         self, base_dir: Path, info_url: str, config_path: Path | None = None,
         state_path: Path | None = None, env_config: str = "{}",
+        fwalert_url: str = "", alert_recorder: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.info_url = info_url
         self.config_path = config_path or base_dir / "wallets_config.json"
         self.state_path = state_path or base_dir / "wallet_monitor_state.json"
+        # 电话告警复用波动告警的同一个 fwalert 链接（由 app.py 注入）。
+        self.fwalert_url = fwalert_url
+        self._alert_recorder = alert_recorder
+        self._last_alert_at: dict[str, float] = {}
         self._lock = threading.RLock()
         self._cycle_lock = threading.Lock()
         self._stop = threading.Event()
@@ -467,11 +518,11 @@ class WalletMonitor:
                 "stale": stale,
             })
 
-    def _commit_fills(self, wallet: dict[str, Any], generation: int, fills: list[dict[str, Any]], end_ms: int) -> bool:
+    def _commit_fills(self, wallet: dict[str, Any], generation: int, fills: list[dict[str, Any]], end_ms: int) -> list[dict[str, Any]] | None:
         address = wallet["address"]
         with self._lock:
             if not self._current(address, generation):
-                return False
+                return None
             point = copy.deepcopy(self._checkpoints[address])
             seen = {entry["id"] for entry in point["seen"]}
             new_events = []
@@ -493,7 +544,129 @@ class WalletMonitor:
             self._checkpoints = points
             self._events = events
             self._wallets[address]["initialized"] = True
-            return True
+            return new_events
+
+    @staticmethod
+    def _compact(value: float | int | None) -> str:
+        if value is None:
+            return "-"
+        return f"{float(value):.10g}"
+
+    def _alert_summary(self, events: list[dict[str, Any]]) -> str:
+        parts = []
+        for event in events:
+            side_text = "多" if event["side"] == "long" else "空"
+            action_text = ACTION_LABELS.get(event["action"], event["action"])
+            parts.append(
+                f"{action_text} {event['coin']} {side_text} "
+                f"{self._compact(event.get('size'))} @ {self._compact(event.get('price'))}"
+            )
+        return "；".join(parts)
+
+    def _record_alert(self, record: dict[str, Any]) -> None:
+        recorder = self._alert_recorder
+        if recorder is None:
+            return
+        try:
+            recorder(record)
+        except Exception:
+            logger.exception("Failed to persist wallet alert record")
+
+    def _persist_state(self) -> None:
+        try:
+            with self._lock:
+                _atomic_write(
+                    self.state_path,
+                    {"version": 1, "checkpoints": self._checkpoints, "events": self._events},
+                )
+        except OSError as exc:
+            with self._lock:
+                self._last_error = f"保存电话告警标记失败：{exc}"
+            logger.warning("Failed to persist phone-alert marks: %s", exc)
+
+    def _mark_alert_events(self, events: list[dict[str, Any]], status: str, at: float) -> None:
+        """在触发判断的成交事件上留下拨号痕迹，供页面追溯（随状态文件持久化）。"""
+        for event in events:
+            event["alert"] = {"status": status, "at": at}
+        self._persist_state()
+
+    def _maybe_alert_open_close(
+        self, wallet: dict[str, Any], generation: int, events: list[dict[str, Any]],
+    ) -> bool:
+        """开单 / 关单（含反手）时拨电话；每个地址用自己的开关和冷却窗口。"""
+        interesting = [event for event in events if event["action"] in ALERT_ACTIONS]
+        if not interesting:
+            return False
+        if not wallet.get("alert_enabled", True):
+            self._mark_alert_events(interesting, "disabled", time.time())
+            return False
+        address = wallet["address"]
+        cooldown = int(wallet.get("alert_cooldown_seconds", DEFAULT_ALERT_COOLDOWN_SECONDS))
+        now = time.time()
+        with self._lock:
+            if not self._current(address, generation):
+                return False
+            last = self._last_alert_at.get(address, 0.0)
+            remaining = cooldown - (now - last)
+            if last and remaining > 0:
+                logger.info(
+                    "[%s] Wallet open/close alert suppressed by cooldown (%.0fs left): %s",
+                    address, remaining, self._alert_summary(interesting),
+                )
+                self._mark_alert_events(interesting, "cooldown", now)
+                return False
+
+        record = {
+            "event": "wallet_open_close",
+            "market": wallet.get("label") or f"{address[:6]}…{address[-4:]}",
+            "address": address,
+            "label": wallet.get("label") or "",
+            "symbol": ",".join(dict.fromkeys(str(event["coin"]) for event in interesting)),
+            # 一批多笔时价格没有单一含义，交给 detail 描述，避免页面出现误导性单价。
+            "price": interesting[-1]["price"] if len(interesting) == 1 else None,
+            "actions": [event["action"] for event in interesting],
+            "detail": self._alert_summary(interesting),
+            "event_ids": [event["id"] for event in interesting],
+            "timestamp": now,
+            "beijing_time": datetime.fromtimestamp(now, BEIJING_TZ).isoformat(),
+        }
+
+        if not self.fwalert_url:
+            record["error"] = "missing_fwalert_url"
+            self._record_alert(record)
+            self._mark_alert_events(interesting, "missing_url", now)
+            logger.error("[%s] Missing FWALERT_URL, wallet open/close alert not sent", address)
+            return False
+
+        with self._lock:
+            # Claim the cooldown slot before dialling so a concurrent cycle can't double-dial,
+            # but re-check first because the check above happened outside the request.
+            last = self._last_alert_at.get(address, 0.0)
+            if last and cooldown - (time.time() - last) > 0:
+                logger.info("[%s] Wallet open/close alert suppressed by cooldown", address)
+                self._mark_alert_events(interesting, "cooldown", time.time())
+                return False
+            self._last_alert_at[address] = now
+
+        try:
+            response = requests.get(self.fwalert_url, timeout=15)
+            response.raise_for_status()
+        except Exception as exc:
+            with self._lock:
+                # A failed dial must not eat the window: the next open/close still gets a call.
+                if self._last_alert_at.get(address) == now:
+                    self._last_alert_at.pop(address, None)
+            record["error"] = type(exc).__name__
+            self._record_alert(record)
+            self._mark_alert_events(interesting, "failed", now)
+            logger.exception("[%s] Failed to dial wallet open/close alert", address)
+            return False
+
+        record["status_code"] = response.status_code
+        self._record_alert(record)
+        self._mark_alert_events(interesting, "dialled", now)
+        logger.warning("[%s] Wallet open/close phone alert dialled: %s", address, record["detail"])
+        return True
 
     def run_cycle(self) -> None:
         # On-demand refresh has its own snapshot; only one fill poll can advance cursors.
@@ -514,8 +687,12 @@ class WalletMonitor:
                 wallet_errors = []
                 try:
                     fills = self._request_fills(address, start_ms, end_ms)
-                    if not self._commit_fills(wallet, generation, fills, end_ms):
+                    new_events = self._commit_fills(wallet, generation, fills, end_ms)
+                    if new_events is None:
                         continue
+                    if new_events:
+                        # 在新成交落盘之后拨号：即使 webhook 失败，事件也不会丢。
+                        self._maybe_alert_open_close(wallet, generation, new_events)
                 except Exception as exc:
                     wallet_errors.append(f"成交同步失败：{exc}")
                     logger.warning("[%s] Fill sync failed: %s", address, exc)

@@ -128,6 +128,10 @@ wallet_monitor = WalletMonitor(
     config_path=resolve_data_path("WALLETS_CONFIG_PATH", "wallets_config.json"),
     state_path=resolve_data_path("WALLET_STATE_PATH", "wallet_monitor_state.json"),
     env_config=os.getenv("WALLETS_CONFIG", "{}"),
+    # 电话告警复用波动告警的同一条 fwalert 链接；记录器延后解析
+    # （append_alert_record 定义在文件后面，lambda 调用时才查名字）。
+    fwalert_url=FWALERT_URL,
+    alert_recorder=lambda record: append_alert_record(record),
 )
 
 if POLL_INTERVAL_SECONDS <= 0:
@@ -925,7 +929,11 @@ def format_alert_time(value: Any) -> str:
 
 
 def describe_alert_condition(record: dict[str, Any]) -> str:
-    """把一条记录翻译成可读的触发条件（价格到达 / 波动振幅）。"""
+    """把一条记录翻译成可读的触发条件（价格到达 / 波动振幅 / 钱包开平仓）。"""
+    if record.get("event") == "wallet_open_close":
+        detail = record.get("detail")
+        return html.escape(str(detail)) if detail else "-"
+
     target_price = record.get("target_price")
     if target_price is not None:
         direction_text = {"up": "向上到达", "down": "向下到达"}.get(str(record.get("direction")), "")
@@ -978,6 +986,8 @@ def alert_event_label(record: dict[str, Any]) -> str:
         return "波动告警"
     if event == "price_reached":
         return "价格到达"
+    if event == "wallet_open_close":
+        return "钱包开平仓"
     return html.escape(event or "-")
 
 

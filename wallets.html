@@ -69,6 +69,11 @@
     #dirty { color: var(--warning); font-size: 12px; }
     .wallet-editor { display: grid; grid-template-columns: minmax(230px, 2fr) minmax(130px, 1fr) auto auto; align-items: end; gap: 12px; padding: 13px 0; }
     .wallet-editor + .wallet-editor { border-top: 1px solid var(--line); }
+    .wallet-alert { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 10px 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; }
+    .wallet-alert .toggle { min-height: 0; font-size: 13px; }
+    .wallet-cooldown { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+    .wallet-cooldown input { width: 84px; }
+    .wallet-alert-hint { font-size: 11px; color: var(--muted); }
     .toggle { display: flex; align-items: center; gap: 7px; min-height: 38px; white-space: nowrap; }
     .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 25px 14px; line-height: 1.8; }
     .notice { display: none; padding: 12px 15px; border: 1px solid var(--line); border-radius: 10px; font-size: 13px; line-height: 1.7; margin: 12px 0; overflow-wrap: anywhere; }
@@ -109,6 +114,10 @@
     .card-head strong { font-size: 16px; overflow-wrap: anywhere; }
     .badge { display: inline-block; border-radius: 6px; padding: 4px 8px; background: rgba(78,225,160,.09); color: var(--accent); font-size: 12px; white-space: nowrap; }
     .badge.close { color: var(--warning); background: rgba(243,201,105,.08); }
+    .phone-badge { display: inline-block; border-radius: 6px; padding: 2px 8px; font-size: 11px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+    .phone-badge.dialled { color: var(--accent); border-color: rgba(78,225,160,.45); background: rgba(78,225,160,.08); }
+    .phone-badge.cooldown { color: var(--warning); border-color: rgba(243,201,105,.35); background: rgba(243,201,105,.06); }
+    .phone-badge.failed, .phone-badge.missing_url { color: var(--danger); border-color: rgba(255,139,139,.4); background: rgba(255,139,139,.06); }
     .event-wallet { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; margin-bottom: 13px; }
     .event-values { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 0; }
     .event-values dt { color: var(--muted); font-size: 11px; margin-bottom: 6px; }
@@ -171,7 +180,7 @@
       </section>
 
       <section class="panel" aria-labelledby="eventsTitle">
-        <div class="section-head"><div><h2 id="eventsTitle">开平仓通知</h2><p class="description">最新成交排在最前，最多展示 100 张卡片；页面每 5 秒同步一次，新增成交会在右下角提示。</p></div><span id="eventCount" class="muted">—</span></div>
+        <div class="section-head"><div><h2 id="eventsTitle">开平仓通知</h2><p class="description">最新成交排在最前，最多展示 100 张卡片；页面每 5 秒同步一次，新增成交会在右下角提示。卡片右下角的电话标记说明这笔成交有没有拨号：绿色「已拨电话」= 触发了电话告警，黄色「冷却中未拨」= 该地址还在自己的冷却窗口里，红色「拨号失败 / 未配置电话链接」= 应拨未拨；加仓、减仓以及关闭了该地址电话告警时不拨号（后者标「电话告警已关闭」）。</p></div><span id="eventCount" class="muted">—</span></div>
         <div id="events" class="events"><div class="empty">正在加载通知…</div></div>
       </section>
     </div>
@@ -179,7 +188,7 @@
     <div id="configPanel" role="tabpanel" aria-labelledby="configTab" tabindex="0" hidden>
       <section class="panel" aria-labelledby="configTitle">
         <div class="section-head">
-          <div><h2 id="configTitle">监控配置</h2><p class="description">添加公开钱包地址，保存后立即生效。首次启用只监控此后发生的成交。地址较多时会自动延长间隔，每轮完成后再次计时。</p></div>
+          <div><h2 id="configTitle">监控配置</h2><p class="description">添加公开钱包地址，保存后立即生效。首次启用只监控此后发生的成交。地址较多时会自动延长间隔，每轮完成后再次计时。每个地址可以单独设置「开单 / 关单电话告警」开关和冷却秒数，互不影响。</p></div>
           <button id="addButton" class="btn" type="button" disabled>＋ 添加地址</button>
         </div>
         <form id="configForm">
@@ -304,6 +313,8 @@
     function applySavedConfig(config, replaceDraft = !dirty && !saving) {
       const wallets = config.wallets.map(wallet => ({
         address: wallet.address, label: wallet.label || "", enabled: wallet.enabled,
+        alert_enabled: wallet.alert_enabled !== false,
+        alert_cooldown_seconds: Number(wallet.alert_cooldown_seconds) || 600,
       }));
       const interval = config.poll_interval_seconds || 15;
       const key = JSON.stringify({ poll_interval_seconds: interval, wallets });
@@ -394,7 +405,23 @@
         remove.type = "button"; remove.disabled = saving;
         remove.setAttribute("aria-label", `移除地址 ${index + 1}`);
         remove.addEventListener("click", () => { draft.splice(index, 1); setDirty(); renderEditors(); });
-        row.append(addressField, labelField, toggle, remove);
+        // 电话告警按地址独立设置：开关 + 冷却秒数
+        const alertGroup = element("div", null, "wallet-alert");
+        const alertToggle = element("label", null, "toggle");
+        const alertEnabled = element("input");
+        alertEnabled.type = "checkbox"; alertEnabled.checked = wallet.alert_enabled !== false; alertEnabled.disabled = saving;
+        alertEnabled.addEventListener("change", () => { draft[index].alert_enabled = alertEnabled.checked; setDirty(); });
+        alertToggle.append(alertEnabled, document.createTextNode("开单 / 关单电话告警"));
+        const cooldownField = element("label", null, "wallet-cooldown");
+        cooldownField.append(document.createTextNode("冷却（秒）"));
+        const cooldown = element("input");
+        cooldown.type = "number"; cooldown.min = "30"; cooldown.max = "86400"; cooldown.step = "30";
+        cooldown.required = true; cooldown.disabled = saving;
+        cooldown.value = wallet.alert_cooldown_seconds ?? 600;
+        cooldown.addEventListener("input", () => { draft[index].alert_cooldown_seconds = Number(cooldown.value); setDirty(); });
+        cooldownField.append(cooldown);
+        alertGroup.append(alertToggle, cooldownField, element("span", "冷却按这个地址单独计算，窗口内只拨第一通", "wallet-alert-hint"));
+        row.append(addressField, labelField, toggle, remove, alertGroup);
         container.append(row);
       });
       byId("addButton").disabled = saving || !configReady || draft.length >= 20;
@@ -588,6 +615,20 @@
         footer.append(element("span", `${time(event.beijing_time || event.timestamp)}（北京）`));
         const orderId = event.order_id === null || event.order_id === undefined ? "" : `订单 ${event.order_id}`;
         if (orderId) footer.append(element("span", orderId));
+        const phoneMark = event.alert && event.alert.status ? event.alert : null;
+        if (phoneMark) {
+          const phoneLabels = {
+            dialled: "已拨电话", cooldown: "冷却中未拨", failed: "拨号失败",
+            missing_url: "未配置电话链接", disabled: "电话告警已关闭",
+          };
+          const text = phoneLabels[phoneMark.status] || phoneMark.status;
+          const when = phoneMark.at ? ` · ${time(phoneMark.at, true)}` : "";
+          const badge = element("span", `${text}${when}`, `phone-badge ${phoneMark.status}`);
+          badge.title = phoneMark.status === "dialled"
+            ? "这笔成交触发了电话告警，可在 /alert 页按时间核对同一条记录"
+            : "这笔成交没有拨出电话，原因见标记";
+          footer.append(badge);
+        }
         card.append(header, wallet, values, positionChange, footer); container.append(card);
       }
     }
@@ -657,7 +698,16 @@
         updateConfigSyncNotice();
         return;
       }
-      const payload = { poll_interval_seconds: Number(byId("pollInterval").value), wallets: draft.map(wallet => ({ address: wallet.address.trim().toLowerCase(), label: String(wallet.label || "").trim(), enabled: Boolean(wallet.enabled) })) };
+      const payload = {
+        poll_interval_seconds: Number(byId("pollInterval").value),
+        wallets: draft.map(wallet => ({
+          address: wallet.address.trim().toLowerCase(),
+          label: String(wallet.label || "").trim(),
+          enabled: Boolean(wallet.enabled),
+          alert_enabled: wallet.alert_enabled !== false,
+          alert_cooldown_seconds: Number(wallet.alert_cooldown_seconds) || 600,
+        })),
+      };
       if (draftBaseVersion) payload.expected_version = draftBaseVersion;
       saving = true;
       byId("saveButton").disabled = true; byId("reloadButton").disabled = true; byId("pollInterval").disabled = true;
@@ -713,7 +763,7 @@
 
     byId("addButton").addEventListener("click", () => {
       if (draft.length >= 20) return;
-      draft.push({ address: "", label: "", enabled: true }); setDirty(); renderEditors();
+      draft.push({ address: "", label: "", enabled: true, alert_enabled: true, alert_cooldown_seconds: 600 }); setDirty(); renderEditors();
       byId(`address-${draft.length - 1}`).focus();
     });
     byId("pollInterval").addEventListener("input", () => setDirty());

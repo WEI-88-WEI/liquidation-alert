@@ -285,6 +285,28 @@ class MonitoringTests(unittest.TestCase):
             self.assertIn("暂无电话告警记录", empty_page)
             self.assertIn("共 0 条", empty_page)
 
+    def test_wallet_open_close_record_renders_in_alert_page(self):
+        record = {
+            "event": "wallet_open_close",
+            "market": "铠闪1",
+            "address": "0x" + "a" * 40,
+            "label": "铠闪1",
+            "symbol": "xyz:KIOXIA",
+            "price": 91.778,
+            "actions": ["open"],
+            "detail": "开仓 xyz:KIOXIA 多 12 @ 91.778",
+            "status_code": 200,
+            "timestamp": time.time(),
+            "beijing_time": "2026-10-28T19:40:05+08:00",
+        }
+        self.assertEqual(app.alert_event_label(record), "钱包开平仓")
+        self.assertIn("开仓 xyz:KIOXIA 多 12 @ 91.778", app.describe_alert_condition(record))
+        self.assertEqual(app.describe_alert_result(record), ("已拨出（200）", "ok"))
+        # detail 来自外部数据（币名/备注），必须转义
+        escaped = app.describe_alert_condition({**record, "detail": "<img src=x onerror=alert(1)>"})
+        self.assertNotIn("<img src=x", escaped)
+        self.assertIn("&lt;img src=x", escaped)
+
 
 if __name__ == "__main__":
     unittest.main()
